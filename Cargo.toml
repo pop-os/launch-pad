@@ -1,0 +1,11 @@
+[package]
+name = "launch-pad"
+description = "Asynchronous process manager library"
+version = "0.1.0"
+edition = "2021"
+authors = ["Lucy <lucy@system76.com>"]
+repository = "https://github.com/pop-os/launch-pad"
+license = "MPL-2.0"
+
+[dependencies]
+tokio = "1"
