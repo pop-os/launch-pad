@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 pub struct ProcessManager {
-	max_restarts: usize,
+	inner: Arc<RwLock<ProcessManagerInner>>,
 }
 
 impl ProcessManager {
@@ -19,4 +21,8 @@ impl ProcessManager {
 	}
 
 	fn start_impl(&self, name: &str, args: Vec<String>, env: Vec<(String, String)>) {}
+}
+
+struct ProcessManagerInner {
+	max_restarts: usize,
 }

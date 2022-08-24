@@ -8,4 +8,4 @@ repository = "https://github.com/pop-os/launch-pad"
 license = "MPL-2.0"
 
 [dependencies]
-tokio = { version = "1", features = ["process"] }
+tokio = { version = "1", features = ["process", "sync"] }
