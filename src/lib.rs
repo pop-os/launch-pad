@@ -4,22 +4,44 @@ pub mod process;
 pub use self::process::Process;
 use slotmap::{new_key_type, SlotMap};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, oneshot, RwLock};
 
 new_key_type! { pub struct ProcessKey; }
 
+#[derive(Clone)]
 pub struct ProcessManager {
 	inner: Arc<RwLock<ProcessManagerInner>>,
+	tx: mpsc::UnboundedSender<(Process, oneshot::Sender<ProcessKey>)>,
 }
 
 impl ProcessManager {
-	pub async fn start(&self, process: Process) -> ProcessKey {
-		self.start_impl(process).await
+	pub async fn new() -> Self {
+		let (tx, mut rx) = mpsc::unbounded_channel();
+		let inner = Arc::new(RwLock::new(ProcessManagerInner {
+			max_restarts: 3,
+			processes: SlotMap::with_key(),
+		}));
+		let manager = ProcessManager {
+			inner: inner.clone(),
+			tx,
+		};
+		tokio::spawn(async move {
+			loop {
+				while let Some((process, return_tx)) = rx.recv().await {
+					let mut inner = inner.write().await;
+					return_tx
+						.send(inner.processes.insert(process))
+						.expect("failed to send response");
+				}
+			}
+		});
+		manager
 	}
 
-	async fn start_impl(&self, process: Process) -> ProcessKey {
-		let mut inner = self.inner.write().await;
-		inner.processes.insert(process)
+	pub async fn start(&self, process: Process) -> ProcessKey {
+		let (return_tx, return_rx) = oneshot::channel();
+		let _ = self.tx.send((process, return_tx));
+		return_rx.await.unwrap()
 	}
 
 	/// Returns the maximum amount of times a process can be restarted before
