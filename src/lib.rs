@@ -4,8 +4,12 @@ pub mod process;
 
 pub use self::{message::ProcessMessage, process::Process};
 use slotmap::{new_key_type, SlotMap};
-use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
+use std::{process::Stdio, sync::Arc};
+use tokio::{
+	io::{AsyncBufReadExt, BufReader},
+	process::Command,
+	sync::{broadcast, mpsc, oneshot, RwLock},
+};
 
 new_key_type! { pub struct ProcessKey; }
 
@@ -68,10 +72,53 @@ struct ProcessManagerInner {
 }
 
 impl ProcessManagerInner {
-	pub fn start_process(&mut self, process: Process) -> ProcessKey {
+	pub fn start_process(&mut self, mut process: Process) -> ProcessKey {
+		let mut command = Command::new(&process.executable)
+			.args(&process.args)
+			.envs(process.env.clone())
+			.stdout(Stdio::piped())
+			.stderr(Stdio::piped())
+			.stdin(Stdio::null())
+			.kill_on_drop(true)
+			.spawn()
+			.expect("failed to start process");
+		let (on_stdout, on_stderr, on_start, on_exit) = (
+			process.on_stdout.take(),
+			process.on_stderr.take(),
+			process.on_start.take(),
+			process.on_exit.take(),
+		);
 		let key = self.processes.insert(ProcessData {
 			process,
 			restarts: 0,
+		});
+		if let Some(on_start) = &on_start {
+			tokio::spawn(on_start(false));
+		}
+		tokio::spawn(async move {
+			let mut stdout = BufReader::new(command.stdout.take().unwrap()).lines();
+			let mut stderr = BufReader::new(command.stderr.take().unwrap()).lines();
+			loop {
+				tokio::select! {
+					Ok(Some(stdout_line)) = stdout.next_line() => {
+						if let Some(on_stdout) = &on_stdout {
+							on_stdout(stdout_line).await;
+						}
+					}
+					Ok(Some(stderr_line)) = stderr.next_line() => {
+						if let Some(on_stderr) = &on_stderr {
+							on_stderr(stderr_line).await;
+						}
+					}
+					ret = command.wait() => {
+						let ret = ret.unwrap();
+						if let Some(on_exit) = &on_exit {
+							on_exit(ret.code(), false).await;
+						}
+						break;
+					}
+				}
+			}
 		});
 		key
 	}
