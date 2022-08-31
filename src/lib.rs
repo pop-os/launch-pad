@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MPL-2.0
+pub mod message;
 pub mod process;
 
-pub use self::process::Process;
+pub use self::{message::ProcessMessage, process::Process};
 use slotmap::{new_key_type, SlotMap};
 use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{broadcast, mpsc, oneshot, RwLock};
 
 new_key_type! { pub struct ProcessKey; }
 
@@ -28,10 +29,9 @@ impl ProcessManager {
 		tokio::spawn(async move {
 			loop {
 				while let Some((process, return_tx)) = rx.recv().await {
-					let mut inner = inner.write().await;
 					return_tx
-						.send(inner.processes.insert(process))
-						.expect("failed to send response");
+						.send(inner.write().await.start_process(process))
+						.unwrap();
 				}
 			}
 		});
@@ -57,7 +57,22 @@ impl ProcessManager {
 	}
 }
 
+struct ProcessData {
+	process: Process,
+	restarts: usize,
+}
+
 struct ProcessManagerInner {
 	max_restarts: usize,
-	processes: SlotMap<ProcessKey, Process>,
+	processes: SlotMap<ProcessKey, ProcessData>,
+}
+
+impl ProcessManagerInner {
+	pub fn start_process(&mut self, process: Process) -> ProcessKey {
+		let key = self.processes.insert(ProcessData {
+			process,
+			restarts: 0,
+		});
+		key
+	}
 }
