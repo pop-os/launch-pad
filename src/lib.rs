@@ -103,8 +103,8 @@ impl ProcessManagerInner {
 		let queue_clone = queue.clone();
 		tokio::spawn(async move {
 			loop {
-				let mut queue = queue_clone.lock().await;
-				if let Some(future) = queue.pop_front() {
+				let queued_callback = { queue_clone.lock().await.pop_front() };
+				if let Some(future) = queued_callback {
 					future.await;
 				};
 				tokio::task::yield_now().await;
