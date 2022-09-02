@@ -2,13 +2,16 @@
 pub mod message;
 pub mod process;
 
-pub use self::{message::ProcessMessage, process::Process};
+pub use self::{
+	message::ProcessMessage,
+	process::{Process, ReturnFuture},
+};
 use slotmap::{new_key_type, SlotMap};
-use std::{process::Stdio, sync::Arc};
+use std::{collections::VecDeque, future::Future, process::Stdio, sync::Arc};
 use tokio::{
 	io::{AsyncBufReadExt, BufReader},
 	process::Command,
-	sync::{broadcast, mpsc, oneshot, RwLock},
+	sync::{mpsc, oneshot, Mutex, RwLock},
 };
 
 new_key_type! { pub struct ProcessKey; }
@@ -34,7 +37,7 @@ impl ProcessManager {
 			loop {
 				while let Some((process, return_tx)) = rx.recv().await {
 					return_tx
-						.send(inner.write().await.start_process(process))
+						.send(inner.write().await.start_process(process).await)
 						.unwrap();
 				}
 			}
@@ -72,7 +75,7 @@ struct ProcessManagerInner {
 }
 
 impl ProcessManagerInner {
-	pub fn start_process(&mut self, mut process: Process) -> ProcessKey {
+	pub async fn start_process(&mut self, mut process: Process) -> ProcessKey {
 		let mut command = Command::new(&process.executable)
 			.args(&process.args)
 			.envs(process.env.clone())
@@ -92,8 +95,23 @@ impl ProcessManagerInner {
 			process,
 			restarts: 0,
 		});
+		// This adds futures into a queue and executes them in a separate task, in order
+		// to both ensure execution of callbacks is in the same order the events are
+		// received, and to avoid blocking the reception of events if a callback is slow
+		// to return.
+		let queue = Arc::new(Mutex::new(VecDeque::<ReturnFuture>::new()));
+		let queue_clone = queue.clone();
+		tokio::spawn(async move {
+			loop {
+				let mut queue = queue_clone.lock().await;
+				if let Some(future) = queue.pop_front() {
+					future.await;
+				};
+				tokio::task::yield_now().await;
+			}
+		});
 		if let Some(on_start) = &on_start {
-			tokio::spawn(on_start(false));
+			queue.lock().await.push_back(on_start(false));
 		}
 		tokio::spawn(async move {
 			let mut stdout = BufReader::new(command.stdout.take().unwrap()).lines();
@@ -102,18 +120,18 @@ impl ProcessManagerInner {
 				tokio::select! {
 					Ok(Some(stdout_line)) = stdout.next_line() => {
 						if let Some(on_stdout) = &on_stdout {
-							on_stdout(stdout_line).await;
+							queue.lock().await.push_back(on_stdout(stdout_line));
 						}
 					}
 					Ok(Some(stderr_line)) = stderr.next_line() => {
 						if let Some(on_stderr) = &on_stderr {
-							on_stderr(stderr_line).await;
+							queue.lock().await.push_back(on_stderr(stderr_line));
 						}
 					}
 					ret = command.wait() => {
 						let ret = ret.unwrap();
 						if let Some(on_exit) = &on_exit {
-							on_exit(ret.code(), false).await;
+							queue.lock().await.push_back(on_exit(ret.code(), false));
 						}
 						break;
 					}
