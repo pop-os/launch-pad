@@ -7,7 +7,7 @@ pub use self::{
 	process::{Process, ReturnFuture},
 };
 use slotmap::{new_key_type, SlotMap};
-use std::{collections::VecDeque, future::Future, process::Stdio, sync::Arc};
+use std::{collections::VecDeque, process::Stdio, sync::Arc};
 use tokio::{
 	io::{AsyncBufReadExt, BufReader},
 	process::Command,
