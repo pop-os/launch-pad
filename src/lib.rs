@@ -29,15 +29,13 @@ impl ProcessManager {
 			max_restarts: 3,
 			processes: SlotMap::with_key(),
 		}));
-		let manager = ProcessManager {
-			inner: inner.clone(),
-			tx,
-		};
+		let manager = ProcessManager { inner, tx };
+		let manager_clone = manager.clone();
 		tokio::spawn(async move {
 			loop {
 				while let Some((process, return_tx)) = rx.recv().await {
 					return_tx
-						.send(inner.write().await.start_process(process).await)
+						.send(manager_clone.start_process(process).await)
 						.unwrap();
 				}
 			}
@@ -62,20 +60,9 @@ impl ProcessManager {
 	pub async fn set_max_restarts(&self, max_restarts: usize) {
 		self.inner.write().await.max_restarts = max_restarts;
 	}
-}
 
-struct ProcessData {
-	process: Process,
-	restarts: usize,
-}
-
-struct ProcessManagerInner {
-	max_restarts: usize,
-	processes: SlotMap<ProcessKey, ProcessData>,
-}
-
-impl ProcessManagerInner {
-	pub async fn start_process(&mut self, mut process: Process) -> ProcessKey {
+	pub async fn start_process(&self, mut process: Process) -> ProcessKey {
+		let mut inner = self.inner.write().await;
 		let mut command = Command::new(&process.executable)
 			.args(&process.args)
 			.envs(process.env.clone())
@@ -91,7 +78,7 @@ impl ProcessManagerInner {
 			process.on_start.take(),
 			process.on_exit.take(),
 		);
-		let key = self.processes.insert(ProcessData {
+		let key = inner.processes.insert(ProcessData {
 			process,
 			restarts: 0,
 		});
@@ -140,4 +127,14 @@ impl ProcessManagerInner {
 		});
 		key
 	}
+}
+
+struct ProcessData {
+	process: Process,
+	restarts: usize,
+}
+
+struct ProcessManagerInner {
+	max_restarts: usize,
+	processes: SlotMap<ProcessKey, ProcessData>,
 }
