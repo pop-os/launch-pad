@@ -138,7 +138,7 @@ impl ProcessManager {
 					let is_restarting = {
 						let inner = self.inner.read().await;
 						let process = inner.processes.get(key).unwrap();
-						inner.max_restarts > process.restarts
+						!ret.success() && (inner.max_restarts > process.restarts)
 					};
 					if let Some(on_exit) = &callbacks.on_exit {
 						queue.lock().await.push_back(on_exit(ret.code(), is_restarting));
