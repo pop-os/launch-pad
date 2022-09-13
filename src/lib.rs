@@ -2,15 +2,12 @@
 pub mod message;
 pub mod process;
 
-pub use self::{
-	message::ProcessMessage,
-	process::{Process, ReturnFuture},
-};
+use self::process::{Process, ProcessCallbacks, ReturnFuture};
 use slotmap::{new_key_type, SlotMap};
 use std::{collections::VecDeque, process::Stdio, sync::Arc};
 use tokio::{
 	io::{AsyncBufReadExt, BufReader},
-	process::Command,
+	process::{Child, Command},
 	sync::{mpsc, oneshot, Mutex, RwLock},
 };
 
@@ -63,7 +60,7 @@ impl ProcessManager {
 
 	pub async fn start_process(&self, mut process: Process) -> ProcessKey {
 		let mut inner = self.inner.write().await;
-		let mut command = Command::new(&process.executable)
+		let command = Command::new(&process.executable)
 			.args(&process.args)
 			.envs(process.env.clone())
 			.stdout(Stdio::piped())
@@ -72,12 +69,7 @@ impl ProcessManager {
 			.kill_on_drop(true)
 			.spawn()
 			.expect("failed to start process");
-		let (on_stdout, on_stderr, on_start, on_exit) = (
-			process.on_stdout.take(),
-			process.on_stderr.take(),
-			process.on_start.take(),
-			process.on_exit.take(),
-		);
+		let callbacks = std::mem::take(&mut process.callbacks);
 		let key = inner.processes.insert(ProcessData {
 			process,
 			restarts: 0,
@@ -97,35 +89,45 @@ impl ProcessManager {
 				tokio::task::yield_now().await;
 			}
 		});
-		if let Some(on_start) = &on_start {
+		if let Some(on_start) = &callbacks.on_start {
 			queue.lock().await.push_back(on_start(false));
 		}
+		let clone = self.clone();
 		tokio::spawn(async move {
-			let mut stdout = BufReader::new(command.stdout.take().unwrap()).lines();
-			let mut stderr = BufReader::new(command.stderr.take().unwrap()).lines();
-			loop {
-				tokio::select! {
-					Ok(Some(stdout_line)) = stdout.next_line() => {
-						if let Some(on_stdout) = &on_stdout {
-							queue.lock().await.push_back(on_stdout(stdout_line));
-						}
-					}
-					Ok(Some(stderr_line)) = stderr.next_line() => {
-						if let Some(on_stderr) = &on_stderr {
-							queue.lock().await.push_back(on_stderr(stderr_line));
-						}
-					}
-					ret = command.wait() => {
-						let ret = ret.unwrap();
-						if let Some(on_exit) = &on_exit {
-							queue.lock().await.push_back(on_exit(ret.code(), false));
-						}
-						break;
-					}
-				}
-			}
+			clone.process_loop(command, callbacks, queue).await;
 		});
 		key
+	}
+
+	async fn process_loop(
+		&self,
+		mut command: Child,
+		callbacks: ProcessCallbacks,
+		queue: Arc<Mutex<VecDeque<ReturnFuture>>>,
+	) {
+		let mut stdout = BufReader::new(command.stdout.take().unwrap()).lines();
+		let mut stderr = BufReader::new(command.stderr.take().unwrap()).lines();
+		loop {
+			tokio::select! {
+				Ok(Some(stdout_line)) = stdout.next_line() => {
+					if let Some(on_stdout) = &callbacks.on_stdout {
+						queue.lock().await.push_back(on_stdout(stdout_line));
+					}
+				}
+				Ok(Some(stderr_line)) = stderr.next_line() => {
+					if let Some(on_stderr) = &callbacks.on_stderr {
+						queue.lock().await.push_back(on_stderr(stderr_line));
+					}
+				}
+				ret = command.wait() => {
+					let ret = ret.unwrap();
+					if let Some(on_exit) = &callbacks.on_exit {
+						queue.lock().await.push_back(on_exit(ret.code(), false));
+					}
+					break;
+				}
+			}
+		}
 	}
 }
 

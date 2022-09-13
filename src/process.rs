@@ -9,14 +9,19 @@ pub type ExitedCallback =
 	Box<dyn Fn(Option<i32>, bool) -> ReturnFuture + Unpin + Send + Sync + 'static>;
 
 #[derive(Default)]
-pub struct Process {
-	pub(crate) executable: String,
-	pub(crate) args: Vec<String>,
-	pub(crate) env: Vec<(String, String)>,
+pub(crate) struct ProcessCallbacks {
 	pub(crate) on_stdout: Option<StringCallback>,
 	pub(crate) on_stderr: Option<StringCallback>,
 	pub(crate) on_start: Option<StartedCallback>,
 	pub(crate) on_exit: Option<ExitedCallback>,
+}
+
+#[derive(Default)]
+pub struct Process {
+	pub(crate) executable: String,
+	pub(crate) args: Vec<String>,
+	pub(crate) env: Vec<(String, String)>,
+	pub(crate) callbacks: ProcessCallbacks,
 }
 
 impl Process {
@@ -54,7 +59,7 @@ impl Process {
 		F: Fn(String) -> A + Unpin + Send + Sync + 'static,
 		A: Future<Output = ()> + Unpin + Send + Sync + 'static,
 	{
-		self.on_stdout = Some(Box::new(move |s| Box::new(on_stdout(s))));
+		self.callbacks.on_stdout = Some(Box::new(move |s| Box::new(on_stdout(s))));
 		self
 	}
 
@@ -64,7 +69,7 @@ impl Process {
 		F: Fn(String) -> A + Unpin + Send + Sync + 'static,
 		A: Future<Output = ()> + Unpin + Send + Sync + 'static,
 	{
-		self.on_stderr = Some(Box::new(move |s| Box::new(on_stderr(s))));
+		self.callbacks.on_stderr = Some(Box::new(move |s| Box::new(on_stderr(s))));
 		self
 	}
 
@@ -78,7 +83,7 @@ impl Process {
 		F: Fn(bool) -> A + Unpin + Send + Sync + 'static,
 		A: Future<Output = ()> + Unpin + Send + Sync + 'static,
 	{
-		self.on_start = Some(Box::new(move |r| Box::new(on_start(r))));
+		self.callbacks.on_start = Some(Box::new(move |r| Box::new(on_start(r))));
 		self
 	}
 
@@ -92,7 +97,7 @@ impl Process {
 		F: Fn(Option<i32>, bool) -> A + Unpin + Send + Sync + 'static,
 		A: Future<Output = ()> + Unpin + Send + Sync + 'static,
 	{
-		self.on_exit = Some(Box::new(move |code, restarting| {
+		self.callbacks.on_exit = Some(Box::new(move |code, restarting| {
 			Box::new(on_exit(code, restarting))
 		}));
 		self
