@@ -92,12 +92,29 @@ impl ProcessManager {
 		if let Some(on_start) = &callbacks.on_start {
 			queue.lock().await.push_back(on_start(false));
 		}
-		tokio::spawn(self.clone().process_loop(command, callbacks, queue));
+		tokio::spawn(self.clone().process_loop(key, command, callbacks, queue));
 		key
+	}
+
+	async fn restart_process(&self, process_key: ProcessKey) -> Option<Child> {
+		let mut inner = self.inner.write().await;
+		let process = inner.processes.get_mut(process_key).unwrap();
+		let command = Command::new(&process.process.executable)
+			.args(&process.process.args)
+			.envs(process.process.env.clone())
+			.stdout(Stdio::piped())
+			.stderr(Stdio::piped())
+			.stdin(Stdio::null())
+			.kill_on_drop(true)
+			.spawn()
+			.expect("failed to restart process");
+		process.restarts += 1;
+		Some(command)
 	}
 
 	async fn process_loop(
 		self,
+		key: ProcessKey,
 		mut command: Child,
 		callbacks: ProcessCallbacks,
 		queue: Arc<Mutex<VecDeque<ReturnFuture>>>,
@@ -118,8 +135,24 @@ impl ProcessManager {
 				}
 				ret = command.wait() => {
 					let ret = ret.unwrap();
+					let is_restarting = {
+						let inner = self.inner.read().await;
+						let process = inner.processes.get(key).unwrap();
+						inner.max_restarts > process.restarts
+					};
 					if let Some(on_exit) = &callbacks.on_exit {
-						queue.lock().await.push_back(on_exit(ret.code(), false));
+						queue.lock().await.push_back(on_exit(ret.code(), is_restarting));
+					}
+					if is_restarting {
+						if let Some(new_command) = self.restart_process(key).await {
+							command = new_command;
+							stdout = BufReader::new(command.stdout.take().unwrap()).lines();
+							stderr = BufReader::new(command.stderr.take().unwrap()).lines();
+							if let Some(on_start) = &callbacks.on_start {
+								queue.lock().await.push_back(on_start(true));
+							}
+							continue;
+						}
 					}
 					break;
 				}
