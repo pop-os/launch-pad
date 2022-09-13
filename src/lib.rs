@@ -92,15 +92,12 @@ impl ProcessManager {
 		if let Some(on_start) = &callbacks.on_start {
 			queue.lock().await.push_back(on_start(false));
 		}
-		let clone = self.clone();
-		tokio::spawn(async move {
-			clone.process_loop(command, callbacks, queue).await;
-		});
+		tokio::spawn(self.clone().process_loop(command, callbacks, queue));
 		key
 	}
 
 	async fn process_loop(
-		&self,
+		self,
 		mut command: Child,
 		callbacks: ProcessCallbacks,
 		queue: Arc<Mutex<VecDeque<ReturnFuture>>>,
