@@ -1,11 +1,19 @@
 // SPDX-License-Identifier: MPL-2.0
+use super::{ProcessKey, ProcessManager};
 use std::{borrow::Cow, future::Future};
 
 pub type ReturnFuture = Box<dyn Future<Output = ()> + Unpin + Send + Sync + 'static>;
-pub type StringCallback = Box<dyn Fn(String) -> ReturnFuture + Unpin + Send + Sync + 'static>;
-pub type StartedCallback = Box<dyn Fn(bool) -> ReturnFuture + Unpin + Send + Sync + 'static>;
-pub type ExitedCallback =
-	Box<dyn Fn(Option<i32>, bool) -> ReturnFuture + Unpin + Send + Sync + 'static>;
+pub type StringCallback =
+	Box<dyn Fn(ProcessManager, ProcessKey, String) -> ReturnFuture + Unpin + Send + Sync + 'static>;
+pub type StartedCallback =
+	Box<dyn Fn(ProcessManager, ProcessKey, bool) -> ReturnFuture + Unpin + Send + Sync + 'static>;
+pub type ExitedCallback = Box<
+	dyn Fn(ProcessManager, ProcessKey, Option<i32>, bool) -> ReturnFuture
+		+ Unpin
+		+ Send
+		+ Sync
+		+ 'static,
+>;
 
 #[derive(Default)]
 pub(crate) struct ProcessCallbacks {
@@ -55,20 +63,20 @@ impl Process {
 	/// Sets the callback to run when the process writes to stdout.
 	pub fn with_on_stdout<F, A>(mut self, on_stdout: F) -> Self
 	where
-		F: Fn(String) -> A + Unpin + Send + Sync + 'static,
+		F: Fn(ProcessManager, ProcessKey, String) -> A + Unpin + Send + Sync + 'static,
 		A: Future<Output = ()> + Unpin + Send + Sync + 'static,
 	{
-		self.callbacks.on_stdout = Some(Box::new(move |s| Box::new(on_stdout(s))));
+		self.callbacks.on_stdout = Some(Box::new(move |p, k, s| Box::new(on_stdout(p, k, s))));
 		self
 	}
 
 	/// Sets the callback to run when the process writes to stderr.
 	pub fn with_on_stderr<F, A>(mut self, on_stderr: F) -> Self
 	where
-		F: Fn(String) -> A + Unpin + Send + Sync + 'static,
+		F: Fn(ProcessManager, ProcessKey, String) -> A + Unpin + Send + Sync + 'static,
 		A: Future<Output = ()> + Unpin + Send + Sync + 'static,
 	{
-		self.callbacks.on_stderr = Some(Box::new(move |s| Box::new(on_stderr(s))));
+		self.callbacks.on_stderr = Some(Box::new(move |p, k, s| Box::new(on_stderr(p, k, s))));
 		self
 	}
 
@@ -79,10 +87,10 @@ impl Process {
 	/// restarted or if it was started for the first time.
 	pub fn with_on_start<F, A>(mut self, on_start: F) -> Self
 	where
-		F: Fn(bool) -> A + Unpin + Send + Sync + 'static,
+		F: Fn(ProcessManager, ProcessKey, bool) -> A + Unpin + Send + Sync + 'static,
 		A: Future<Output = ()> + Unpin + Send + Sync + 'static,
 	{
-		self.callbacks.on_start = Some(Box::new(move |r| Box::new(on_start(r))));
+		self.callbacks.on_start = Some(Box::new(move |p, k, r| Box::new(on_start(p, k, r))));
 		self
 	}
 
@@ -93,11 +101,11 @@ impl Process {
 	/// whether the process is going to be restarted or not.
 	pub fn with_on_exit<F, A>(mut self, on_exit: F) -> Self
 	where
-		F: Fn(Option<i32>, bool) -> A + Unpin + Send + Sync + 'static,
+		F: Fn(ProcessManager, ProcessKey, Option<i32>, bool) -> A + Unpin + Send + Sync + 'static,
 		A: Future<Output = ()> + Unpin + Send + Sync + 'static,
 	{
-		self.callbacks.on_exit = Some(Box::new(move |code, restarting| {
-			Box::new(on_exit(code, restarting))
+		self.callbacks.on_exit = Some(Box::new(move |p, k, code, restarting| {
+			Box::new(on_exit(p, k, code, restarting))
 		}));
 		self
 	}

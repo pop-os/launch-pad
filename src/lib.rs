@@ -99,7 +99,10 @@ impl ProcessManager {
 			}
 		});
 		if let Some(on_start) = &callbacks.on_start {
-			queue.lock().await.push_back(on_start(false));
+			queue
+				.lock()
+				.await
+				.push_back(on_start(self.clone(), key, false));
 		}
 		tokio::spawn(self.clone().process_loop(key, command, callbacks, queue));
 		key
@@ -150,12 +153,12 @@ impl ProcessManager {
 			tokio::select! {
 				Ok(Some(stdout_line)) = stdout.next_line() => {
 					if let Some(on_stdout) = &callbacks.on_stdout {
-						queue.lock().await.push_back(on_stdout(stdout_line));
+						queue.lock().await.push_back(on_stdout(self.clone(), key, stdout_line));
 					}
 				}
 				Ok(Some(stderr_line)) = stderr.next_line() => {
 					if let Some(on_stderr) = &callbacks.on_stderr {
-						queue.lock().await.push_back(on_stderr(stderr_line));
+						queue.lock().await.push_back(on_stderr(self.clone(), key, stderr_line));
 					}
 				}
 				ret = command.wait() => {
@@ -166,7 +169,7 @@ impl ProcessManager {
 						!ret.success() && (inner.max_restarts > process.restarts)
 					};
 					if let Some(on_exit) = &callbacks.on_exit {
-						queue.lock().await.push_back(on_exit(ret.code(), is_restarting));
+						queue.lock().await.push_back(on_exit(self.clone(), key, ret.code(), is_restarting));
 					}
 					if is_restarting {
 						if let Some(new_command) = self.restart_process(key).await {
@@ -183,7 +186,7 @@ impl ProcessManager {
 								}
 							};
 							if let Some(on_start) = &callbacks.on_start {
-								queue.lock().await.push_back(on_start(true));
+								queue.lock().await.push_back(on_start(self.clone(), key, true));
 							}
 							continue;
 						}
