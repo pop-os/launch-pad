@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MPL-2.0
-
-use std::future::Future;
+use std::{borrow::Cow, future::Future};
 
 pub type ReturnFuture = Box<dyn Future<Output = ()> + Unpin + Send + Sync + 'static>;
 pub type StringCallback = Box<dyn Fn(String) -> ReturnFuture + Unpin + Send + Sync + 'static>;
@@ -101,5 +100,47 @@ impl Process {
 			Box::new(on_exit(code, restarting))
 		}));
 		self
+	}
+
+	/// Returns a human readable, escaped string of the executable.
+	/// Used for logging.
+	pub(crate) fn exe_text(&self) -> Cow<'_, str> {
+		if self.executable.contains(' ') {
+			Cow::Owned(format!("\"{}\"", self.executable))
+		} else {
+			Cow::Borrowed(&self.executable)
+		}
+	}
+
+	/// Returns a human readable, escaped string of the environment variables.
+	/// Used for logging.
+	pub(crate) fn env_text(&self) -> Cow<'static, str> {
+		if self.env.is_empty() {
+			Cow::Borrowed("")
+		} else {
+			Cow::Owned(self.env.iter().fold(String::new(), |acc, (k, v)| {
+				if v.contains(' ') {
+					format!("{} {}=\"{}\"", acc, k, v)
+				} else {
+					format!("{} {}={}", acc, k, v)
+				}
+			}))
+		}
+	}
+
+	/// Returns a human readable, escaped string of the arguments.
+	/// Used for logging.
+	pub(crate) fn args_text(&self) -> Cow<'static, str> {
+		if self.args.is_empty() {
+			Cow::Borrowed("")
+		} else {
+			Cow::Owned(self.args.iter().fold(String::new(), |acc, arg| {
+				if arg.contains(' ') {
+					format!("{} \"{}\"", acc, arg)
+				} else {
+					format!("{} {}", acc, arg)
+				}
+			}))
+		}
 	}
 }
