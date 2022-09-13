@@ -2,10 +2,14 @@
 #[macro_use]
 extern crate log;
 
+pub mod error;
 pub mod message;
 pub mod process;
 
-use self::process::{Process, ProcessCallbacks, ReturnFuture};
+use self::{
+	error::{Error, Result},
+	process::{Process, ProcessCallbacks, ReturnFuture},
+};
 use slotmap::{new_key_type, SlotMap};
 use std::{collections::VecDeque, process::Stdio, sync::Arc};
 use tokio::{
@@ -19,7 +23,7 @@ new_key_type! { pub struct ProcessKey; }
 #[derive(Clone)]
 pub struct ProcessManager {
 	inner: Arc<RwLock<ProcessManagerInner>>,
-	tx: mpsc::UnboundedSender<(Process, oneshot::Sender<ProcessKey>)>,
+	tx: mpsc::UnboundedSender<(Process, oneshot::Sender<Result<ProcessKey>>)>,
 }
 
 impl ProcessManager {
@@ -43,10 +47,10 @@ impl ProcessManager {
 		manager
 	}
 
-	pub async fn start(&self, process: Process) -> ProcessKey {
+	pub async fn start(&self, process: Process) -> Result<ProcessKey> {
 		let (return_tx, return_rx) = oneshot::channel();
 		let _ = self.tx.send((process, return_tx));
-		return_rx.await.unwrap()
+		return_rx.await?
 	}
 
 	/// Returns the maximum amount of times a process can be restarted before
@@ -61,7 +65,7 @@ impl ProcessManager {
 		self.inner.write().await.max_restarts = max_restarts;
 	}
 
-	pub async fn start_process(&self, mut process: Process) -> ProcessKey {
+	pub async fn start_process(&self, mut process: Process) -> Result<ProcessKey> {
 		let mut inner = self.inner.write().await;
 		debug!(
 			"starting process '{}{}{}'",
@@ -77,7 +81,7 @@ impl ProcessManager {
 			.stdin(Stdio::null())
 			.kill_on_drop(true)
 			.spawn()
-			.expect("failed to start process");
+			.map_err(Error::Process)?;
 		let callbacks = std::mem::take(&mut process.callbacks);
 		let key = inner.processes.insert(ProcessData {
 			process,
@@ -105,12 +109,15 @@ impl ProcessManager {
 				.push_back(on_start(self.clone(), key, false));
 		}
 		tokio::spawn(self.clone().process_loop(key, command, callbacks, queue));
-		key
+		Ok(key)
 	}
 
-	async fn restart_process(&self, process_key: ProcessKey) -> Option<Child> {
+	async fn restart_process(&self, process_key: ProcessKey) -> Result<Child> {
 		let mut inner = self.inner.write().await;
-		let process_data = inner.processes.get_mut(process_key).unwrap();
+		let process_data = inner
+			.processes
+			.get_mut(process_key)
+			.ok_or(Error::InvalidProcess(process_key))?;
 		let command = Command::new(&process_data.process.executable)
 			.args(&process_data.process.args)
 			.envs(process_data.process.env.clone())
@@ -119,7 +126,7 @@ impl ProcessManager {
 			.stdin(Stdio::null())
 			.kill_on_drop(true)
 			.spawn()
-			.expect("failed to restart process");
+			.map_err(Error::Process)?;
 		process_data.restarts += 1;
 		debug!(
 			"restarted process '{}{}{}', now at {} restarts",
@@ -128,7 +135,7 @@ impl ProcessManager {
 			process_data.process.args_text(),
 			process_data.restarts
 		);
-		Some(command)
+		Ok(command)
 	}
 
 	async fn process_loop(
@@ -172,23 +179,28 @@ impl ProcessManager {
 						queue.lock().await.push_back(on_exit(self.clone(), key, ret.code(), is_restarting));
 					}
 					if is_restarting {
-						if let Some(new_command) = self.restart_process(key).await {
-							command = new_command;
-							(stdout, stderr) = match (command.stdout.take(), command.stderr.take()) {
-								(Some(stdout), Some(stderr)) => (
-									BufReader::new(stdout).lines(),
-									BufReader::new(stderr).lines(),
-								),
-								(Some(_), None) => panic!("no stderr in process, even though we should be piping it"),
-								(None, Some(_)) => panic!("no stdout in process, even though we should be piping it"),
-								(None, None) => {
-									panic!("no stdout or stderr in process, even though we should be piping it")
+						match self.restart_process(key).await {
+							Ok(new_command) =>  {
+								command = new_command;
+								(stdout, stderr) = match (command.stdout.take(), command.stderr.take()) {
+									(Some(stdout), Some(stderr)) => (
+										BufReader::new(stdout).lines(),
+										BufReader::new(stderr).lines(),
+									),
+									(Some(_), None) => panic!("no stderr in process, even though we should be piping it"),
+									(None, Some(_)) => panic!("no stdout in process, even though we should be piping it"),
+									(None, None) => {
+										panic!("no stdout or stderr in process, even though we should be piping it")
+									}
+								};
+								if let Some(on_start) = &callbacks.on_start {
+									queue.lock().await.push_back(on_start(self.clone(), key, true));
 								}
-							};
-							if let Some(on_start) = &callbacks.on_start {
-								queue.lock().await.push_back(on_start(self.clone(), key, true));
+								continue;
 							}
-							continue;
+							Err(err) => {
+								error!("failed to restart process '{:?}: {}", key, err);
+							}
 						}
 					}
 					break;
