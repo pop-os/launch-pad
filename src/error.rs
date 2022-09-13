@@ -11,6 +11,10 @@ pub enum Error {
 	ReturnMessage(#[from] RecvError),
 	#[error("failed to start process: {0}")]
 	Process(std::io::Error),
+	#[error("process does not exist")]
+	NonExistantProcess,
+	#[error("process manager has been shut down")]
+	Stopped,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

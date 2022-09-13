@@ -17,6 +17,7 @@ use tokio::{
 	process::{Child, Command},
 	sync::{mpsc, oneshot, Mutex, RwLock},
 };
+use tokio_util::sync::CancellationToken;
 
 new_key_type! { pub struct ProcessKey; }
 
@@ -24,23 +25,35 @@ new_key_type! { pub struct ProcessKey; }
 pub struct ProcessManager {
 	inner: Arc<RwLock<ProcessManagerInner>>,
 	tx: mpsc::UnboundedSender<(Process, oneshot::Sender<Result<ProcessKey>>)>,
+	cancel_token: CancellationToken,
 }
 
 impl ProcessManager {
 	pub async fn new() -> Self {
 		let (tx, mut rx) = mpsc::unbounded_channel();
+		let cancel = CancellationToken::new();
 		let inner = Arc::new(RwLock::new(ProcessManagerInner {
 			max_restarts: 3,
 			processes: SlotMap::with_key(),
 		}));
-		let manager = ProcessManager { inner, tx };
+		let manager = ProcessManager {
+			inner,
+			tx,
+			cancel_token: cancel.clone(),
+		};
 		let manager_clone = manager.clone();
 		tokio::spawn(async move {
 			loop {
-				while let Some((process, return_tx)) = rx.recv().await {
-					return_tx
-						.send(manager_clone.start_process(process).await)
-						.unwrap();
+				tokio::select! {
+					_ = cancel.cancelled() => break,
+					msg = rx.recv() => match msg {
+						Some((process, return_tx)) => {
+							return_tx
+								.send(manager_clone.start_process(process).await)
+								.unwrap();
+						}
+						None => break,
+					}
 				}
 			}
 		});
@@ -65,7 +78,31 @@ impl ProcessManager {
 		self.inner.write().await.max_restarts = max_restarts;
 	}
 
+	/// Returns whether the process manager has been stopped or not.
+	/// If the process manager has been stopped, no new processes can be
+	/// started.
+	pub fn is_stopped(&self) -> bool {
+		self.cancel_token.is_cancelled()
+	}
+
+	/// Stops the process manager, halting all processes and preventing new
+	/// processes from being started.
+	pub fn stop(&self) {
+		self.cancel_token.cancel();
+	}
+
+	/// Stops a single process.
+	pub async fn stop_process(&self, key: ProcessKey) -> Result<()> {
+		let inner = self.inner.read().await;
+		let process = inner.processes.get(key).ok_or(Error::NonExistantProcess)?;
+		process.cancel_token.cancel();
+		Ok(())
+	}
+
 	pub async fn start_process(&self, mut process: Process) -> Result<ProcessKey> {
+		if self.is_stopped() {
+			return Err(Error::Stopped);
+		}
 		let mut inner = self.inner.write().await;
 		debug!(
 			"starting process '{}{}{}'",
@@ -73,6 +110,7 @@ impl ProcessManager {
 			process.exe_text(),
 			process.args_text()
 		);
+		let cancel_token = self.cancel_token.child_token();
 		let command = Command::new(&process.executable)
 			.args(&process.args)
 			.envs(process.env.clone())
@@ -86,6 +124,7 @@ impl ProcessManager {
 		let key = inner.processes.insert(ProcessData {
 			process,
 			restarts: 0,
+			cancel_token: cancel_token.clone(),
 		});
 		// This adds futures into a queue and executes them in a separate task, in order
 		// to both ensure execution of callbacks is in the same order the events are
@@ -93,13 +132,20 @@ impl ProcessManager {
 		// to return.
 		let queue = Arc::new(Mutex::new(VecDeque::<ReturnFuture>::new()));
 		let queue_clone = queue.clone();
+		let queue_token = cancel_token.child_token();
 		tokio::spawn(async move {
 			loop {
-				let queued_callback = { queue_clone.lock().await.pop_front() };
-				if let Some(future) = queued_callback {
-					future.await;
+				let call_next = async {
+					let queued_callback = { queue_clone.lock().await.pop_front() };
+					if let Some(future) = queued_callback {
+						future.await;
+					};
+					tokio::task::yield_now().await
 				};
-				tokio::task::yield_now().await;
+				tokio::select! {
+					_ = call_next => continue,
+					_ = queue_token.cancelled() => break,
+				}
 			}
 		});
 		if let Some(on_start) = &callbacks.on_start {
@@ -108,7 +154,13 @@ impl ProcessManager {
 				.await
 				.push_back(on_start(self.clone(), key, false));
 		}
-		tokio::spawn(self.clone().process_loop(key, command, callbacks, queue));
+		tokio::spawn(self.clone().process_loop(
+			key,
+			cancel_token.child_token(),
+			command,
+			callbacks,
+			queue,
+		));
 		Ok(key)
 	}
 
@@ -141,6 +193,7 @@ impl ProcessManager {
 	async fn process_loop(
 		self,
 		key: ProcessKey,
+		cancel_token: CancellationToken,
 		mut command: Child,
 		callbacks: ProcessCallbacks,
 		queue: Arc<Mutex<VecDeque<ReturnFuture>>>,
@@ -158,6 +211,11 @@ impl ProcessManager {
 		};
 		loop {
 			tokio::select! {
+				_ = cancel_token.cancelled() => {
+					debug!("process '{:?}' cancelled", key);
+					command.kill().await.expect("failed to kill program");
+					break;
+				},
 				Ok(Some(stdout_line)) = stdout.next_line() => {
 					if let Some(on_stdout) = &callbacks.on_stdout {
 						queue.lock().await.push_back(on_stdout(self.clone(), key, stdout_line));
@@ -213,6 +271,7 @@ impl ProcessManager {
 struct ProcessData {
 	process: Process,
 	restarts: usize,
+	cancel_token: CancellationToken,
 }
 
 struct ProcessManagerInner {
