@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MPL-2.0
 use super::{ProcessKey, ProcessManager};
-use std::{borrow::Cow, future::Future};
+use std::{borrow::Cow, future::Future, pin::Pin};
 
-pub type ReturnFuture = Box<dyn Future<Output = ()> + Unpin + Send + Sync + 'static>;
+pub type ReturnFuture = Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>;
 pub type StringCallback =
-	Box<dyn Fn(ProcessManager, ProcessKey, String) -> ReturnFuture + Unpin + Send + Sync + 'static>;
+	Box<dyn Fn(ProcessManager, ProcessKey, String) -> ReturnFuture + Send + Sync + 'static>;
 pub type StartedCallback =
-	Box<dyn Fn(ProcessManager, ProcessKey, bool) -> ReturnFuture + Unpin + Send + Sync + 'static>;
+	Box<dyn Fn(ProcessManager, ProcessKey, bool) -> ReturnFuture + Send + Sync + 'static>;
 pub type ExitedCallback = Box<
 	dyn Fn(ProcessManager, ProcessKey, Option<i32>, bool) -> ReturnFuture
 		+ Unpin
@@ -66,7 +66,7 @@ impl Process {
 		F: Fn(ProcessManager, ProcessKey, String) -> A + Unpin + Send + Sync + 'static,
 		A: Future<Output = ()> + Unpin + Send + Sync + 'static,
 	{
-		self.callbacks.on_stdout = Some(Box::new(move |p, k, s| Box::new(on_stdout(p, k, s))));
+		self.callbacks.on_stdout = Some(Box::new(move |p, k, s| Box::pin(on_stdout(p, k, s))));
 		self
 	}
 
@@ -76,7 +76,7 @@ impl Process {
 		F: Fn(ProcessManager, ProcessKey, String) -> A + Unpin + Send + Sync + 'static,
 		A: Future<Output = ()> + Unpin + Send + Sync + 'static,
 	{
-		self.callbacks.on_stderr = Some(Box::new(move |p, k, s| Box::new(on_stderr(p, k, s))));
+		self.callbacks.on_stderr = Some(Box::new(move |p, k, s| Box::pin(on_stderr(p, k, s))));
 		self
 	}
 
@@ -90,7 +90,7 @@ impl Process {
 		F: Fn(ProcessManager, ProcessKey, bool) -> A + Unpin + Send + Sync + 'static,
 		A: Future<Output = ()> + Unpin + Send + Sync + 'static,
 	{
-		self.callbacks.on_start = Some(Box::new(move |p, k, r| Box::new(on_start(p, k, r))));
+		self.callbacks.on_start = Some(Box::new(move |p, k, r| Box::pin(on_start(p, k, r))));
 		self
 	}
 
@@ -105,7 +105,7 @@ impl Process {
 		A: Future<Output = ()> + Unpin + Send + Sync + 'static,
 	{
 		self.callbacks.on_exit = Some(Box::new(move |p, k, code, restarting| {
-			Box::new(on_exit(p, k, code, restarting))
+			Box::pin(on_exit(p, k, code, restarting))
 		}));
 		self
 	}
