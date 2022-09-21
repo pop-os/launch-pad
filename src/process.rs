@@ -8,11 +8,7 @@ pub type StringCallback =
 pub type StartedCallback =
 	Box<dyn Fn(ProcessManager, ProcessKey, bool) -> ReturnFuture + Send + Sync + 'static>;
 pub type ExitedCallback = Box<
-	dyn Fn(ProcessManager, ProcessKey, Option<i32>, bool) -> ReturnFuture
-		+ Unpin
-		+ Send
-		+ Sync
-		+ 'static,
+	dyn Fn(ProcessManager, ProcessKey, Option<i32>, bool) -> ReturnFuture + Send + Sync + 'static,
 >;
 
 #[derive(Default)]
@@ -64,7 +60,7 @@ impl Process {
 	pub fn with_on_stdout<F, A>(mut self, on_stdout: F) -> Self
 	where
 		F: Fn(ProcessManager, ProcessKey, String) -> A + Unpin + Send + Sync + 'static,
-		A: Future<Output = ()> + Unpin + Send + Sync + 'static,
+		A: Future<Output = ()> + Send + Sync + 'static,
 	{
 		self.callbacks.on_stdout = Some(Box::new(move |p, k, s| Box::pin(on_stdout(p, k, s))));
 		self
@@ -74,7 +70,7 @@ impl Process {
 	pub fn with_on_stderr<F, A>(mut self, on_stderr: F) -> Self
 	where
 		F: Fn(ProcessManager, ProcessKey, String) -> A + Unpin + Send + Sync + 'static,
-		A: Future<Output = ()> + Unpin + Send + Sync + 'static,
+		A: Future<Output = ()> + Send + Sync + 'static,
 	{
 		self.callbacks.on_stderr = Some(Box::new(move |p, k, s| Box::pin(on_stderr(p, k, s))));
 		self
@@ -88,7 +84,7 @@ impl Process {
 	pub fn with_on_start<F, A>(mut self, on_start: F) -> Self
 	where
 		F: Fn(ProcessManager, ProcessKey, bool) -> A + Unpin + Send + Sync + 'static,
-		A: Future<Output = ()> + Unpin + Send + Sync + 'static,
+		A: Future<Output = ()> + Send + Sync + 'static,
 	{
 		self.callbacks.on_start = Some(Box::new(move |p, k, r| Box::pin(on_start(p, k, r))));
 		self
@@ -102,7 +98,7 @@ impl Process {
 	pub fn with_on_exit<F, A>(mut self, on_exit: F) -> Self
 	where
 		F: Fn(ProcessManager, ProcessKey, Option<i32>, bool) -> A + Unpin + Send + Sync + 'static,
-		A: Future<Output = ()> + Unpin + Send + Sync + 'static,
+		A: Future<Output = ()> + Send + Sync + 'static,
 	{
 		self.callbacks.on_exit = Some(Box::new(move |p, k, code, restarting| {
 			Box::pin(on_exit(p, k, code, restarting))
