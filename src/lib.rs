@@ -105,7 +105,7 @@ impl ProcessManager {
 		}
 		let mut inner = self.inner.write().await;
 		debug!(
-			"starting process '{}{}{}'",
+			"starting process '{} {} {}'",
 			process.env_text(),
 			process.exe_text(),
 			process.args_text()
@@ -166,7 +166,7 @@ impl ProcessManager {
 			.map_err(Error::Process)?;
 		process_data.restarts += 1;
 		debug!(
-			"restarted process '{}{}{}', now at {} restarts",
+			"restarted process '{} {} {}', now at {} restarts",
 			process_data.process.env_text(),
 			process_data.process.exe_text(),
 			process_data.process.args_text(),
@@ -261,7 +261,7 @@ impl ProcessManager {
             .into_iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect();
-            pdata.process.env.retain(|(k, _)| !new_env.iter().any(|(k_new, _)| k != k_new));
+            pdata.process.env.retain(|(k, _)| !new_env.iter().any(|(k_new, _)| k == k_new));
             pdata.process.env.append(&mut new_env);
                 Ok(())
         } else {
@@ -269,7 +269,7 @@ impl ProcessManager {
         }
     }
 
-    pub async fn clear_process_env(&mut self, key: &ProcessKey, env: impl IntoIterator<Item = (impl ToString, impl ToString)>,) -> Result<()> {
+    pub async fn clear_process_env(&mut self, key: &ProcessKey) -> Result<()> {
         let mut r = self.inner.write().await;
         if let Some(pdata) = r.processes.get_mut(*key) {
             pdata.process.env.clear();
