@@ -105,7 +105,7 @@ impl ProcessManager {
 		}
 		let mut inner = self.inner.write().await;
 		debug!(
-			"starting process '{}{}{}'",
+			"starting process '{} {} {}'",
 			process.env_text(),
 			process.exe_text(),
 			process.args_text()
@@ -166,7 +166,7 @@ impl ProcessManager {
 			.map_err(Error::Process)?;
 		process_data.restarts += 1;
 		debug!(
-			"restarted process '{}{}{}', now at {} restarts",
+			"restarted process '{} {} {}', now at {} restarts",
 			process_data.process.env_text(),
 			process_data.process.exe_text(),
 			process_data.process.args_text(),
@@ -219,7 +219,8 @@ impl ProcessManager {
 						!ret.success() && (inner.max_restarts > process.restarts)
 					};
 					if let Some(on_exit) = &callbacks.on_exit {
-						let _ = callback_tx.send(on_exit(self.clone(), key, ret.code(), is_restarting));
+                        // wait for this to complete before potentially restarting
+						on_exit(self.clone(), key, ret.code(), is_restarting).await;
 					}
 					if is_restarting {
 						match self.restart_process(key).await {
@@ -251,6 +252,37 @@ impl ProcessManager {
 			}
 		}
 	}
+
+    /// update the env of a managed process
+    /// changes will be applied after the process restarts
+    pub async fn update_process_env(&mut self, key: &ProcessKey, env: impl IntoIterator<Item = (impl ToString, impl ToString)>) -> Result<()> {
+        let mut r = self.inner.write().await;
+        if let Some(pdata) = r.processes.get_mut(*key) {
+            let mut new_env: Vec<(_,_)> = env
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+            pdata.process.env.retain(|(k, _)| !new_env.iter().any(|(k_new, _)| k == k_new));
+            pdata.process.env.append(&mut new_env);
+                Ok(())
+        } else {
+            Err(Error::NonExistantProcess)
+        }
+    }
+
+    /// update the env of a managed process
+    /// changes will be applied after the process restarts
+    pub async fn clear_process_env(&mut self, key: &ProcessKey) -> Result<()> {
+        let mut r = self.inner.write().await;
+        if let Some(pdata) = r.processes.get_mut(*key) {
+            pdata.process.env.clear();
+            Ok(())
+        } else {
+            Err(Error::NonExistantProcess)
+        }
+    }
+
+    // TODO methods for modifying other process data
 }
 
 struct ProcessData {
