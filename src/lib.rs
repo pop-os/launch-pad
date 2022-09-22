@@ -133,21 +133,22 @@ impl ProcessManager {
 		let queue = Arc::new(Mutex::new(VecDeque::<ReturnFuture>::new()));
 		let queue_clone = queue.clone();
 		let queue_token = cancel_token.child_token();
-		tokio::spawn(async move {
-			loop {
-				let call_next = async {
-					let queued_callback = { queue_clone.lock().await.pop_front() };
-					if let Some(future) = queued_callback {
-						future.await;
-					};
-					tokio::task::yield_now().await
-				};
-				tokio::select! {
-					_ = call_next => continue,
-					_ = queue_token.cancelled() => break,
-				}
-			}
-		});
+		// tokio::spawn(async move {
+		// 	loop {
+        //         println!("busy looping");
+		// 		let call_next = async {
+		// 			let queued_callback = { queue_clone.lock().await.pop_front() };
+		// 			if let Some(future) = queued_callback {
+		// 				future.await;
+		// 			};
+		// 			tokio::task::yield_now().await
+		// 		};
+		// 		tokio::select! {
+		// 			_ = call_next => continue,
+		// 			_ = queue_token.cancelled() => break,
+		// 		}
+		// 	}
+		// });
 		if let Some(on_start) = &callbacks.on_start {
 			queue
 				.lock()
@@ -218,12 +219,12 @@ impl ProcessManager {
 				},
 				Ok(Some(stdout_line)) = stdout.next_line() => {
 					if let Some(on_stdout) = &callbacks.on_stdout {
-						queue.lock().await.push_back(on_stdout(self.clone(), key, stdout_line));
+						tokio::spawn(on_stdout(self.clone(), key, stdout_line));
 					}
 				}
 				Ok(Some(stderr_line)) = stderr.next_line() => {
 					if let Some(on_stderr) = &callbacks.on_stderr {
-						queue.lock().await.push_back(on_stderr(self.clone(), key, stderr_line));
+						tokio::spawn(on_stderr(self.clone(), key, stderr_line));
 					}
 				}
 				ret = command.wait() => {
@@ -234,7 +235,7 @@ impl ProcessManager {
 						!ret.success() && (inner.max_restarts > process.restarts)
 					};
 					if let Some(on_exit) = &callbacks.on_exit {
-						queue.lock().await.push_back(on_exit(self.clone(), key, ret.code(), is_restarting));
+						tokio::spawn(on_exit(self.clone(), key, ret.code(), is_restarting));
 					}
 					if is_restarting {
 						match self.restart_process(key).await {
@@ -252,7 +253,7 @@ impl ProcessManager {
 									}
 								};
 								if let Some(on_start) = &callbacks.on_start {
-									queue.lock().await.push_back(on_start(self.clone(), key, true));
+									tokio::spawn(on_start(self.clone(), key, true));
 								}
 								continue;
 							}
