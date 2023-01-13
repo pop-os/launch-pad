@@ -11,7 +11,7 @@ use self::{
 	process::{Process, ProcessCallbacks, ReturnFuture},
 };
 use slotmap::{new_key_type, SlotMap};
-use std::{process::Stdio, sync::Arc};
+use std::{os::unix::process::ExitStatusExt, process::Stdio, sync::Arc};
 use tokio::{
 	io::{AsyncBufReadExt, BufReader},
 	process::{Child, Command},
@@ -104,7 +104,7 @@ impl ProcessManager {
 			return Err(Error::Stopped);
 		}
 		let mut inner = self.inner.write().await;
-		debug!(
+		info!(
 			"starting process '{} {} {}'",
 			process.env_text(),
 			process.exe_text(),
@@ -165,7 +165,7 @@ impl ProcessManager {
 			.spawn()
 			.map_err(Error::Process)?;
 		process_data.restarts += 1;
-		debug!(
+		info!(
 			"restarted process '{} {} {}', now at {} restarts",
 			process_data.process.env_text(),
 			process_data.process.exe_text(),
@@ -197,7 +197,7 @@ impl ProcessManager {
 		loop {
 			tokio::select! {
 				_ = cancel_token.cancelled() => {
-					debug!("process '{:?}' cancelled", key);
+					info!("process '{:?}' cancelled", key);
 					command.kill().await.expect("failed to kill program");
 					break;
 				},
@@ -216,6 +216,16 @@ impl ProcessManager {
 					let is_restarting = {
 						let inner = self.inner.read().await;
 						let process = inner.processes.get(key).unwrap();
+						if !ret.success() {
+							let env_text = process.process.env_text();
+							let exe_text = process.process.exe_text();
+							let args_text = process.process.args_text();
+							if let Some(signal) = ret.signal() {
+								error!("process '{} {} {}' terminated with signal {}", env_text, exe_text, args_text, signal);
+							} else if let Some(code) = ret.code() {
+								error!("process '{} {} {}' failed with code {}", env_text, exe_text, args_text, code);
+							}
+						}
 						!ret.success() && (inner.max_restarts > process.restarts)
 					};
 					if let Some(on_exit) = &callbacks.on_exit {
