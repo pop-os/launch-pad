@@ -10,10 +10,12 @@ use self::{
 	error::{Error, Result},
 	process::{Process, ProcessCallbacks, ReturnFuture},
 };
+use rand::{rngs::OsRng, RngCore};
+use sha2::{Digest, Sha256};
 use slotmap::{new_key_type, SlotMap};
-use std::{os::unix::process::ExitStatusExt, process::Stdio, sync::Arc};
+use std::{future::Future, os::unix::process::ExitStatusExt, pin::Pin, process::Stdio, sync::Arc};
 use tokio::{
-	io::{AsyncBufReadExt, BufReader},
+	io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
 	process::{Child, Command},
 	sync::{mpsc, oneshot, RwLock},
 };
@@ -58,6 +60,36 @@ impl ProcessManager {
 			}
 		});
 		manager
+	}
+
+	async fn gen_and_send_psk<F, A>(
+		&self,
+		on_psk: F,
+		command: &mut Child,
+		key: ProcessKey,
+		callback_tx: mpsc::UnboundedSender<Pin<Box<dyn Future<Output = ()> + Send + Sync>>>,
+	) -> Result<()>
+	where
+		F: Fn(ProcessManager, ProcessKey, Vec<u8>) -> A + Unpin + Send + Sync,
+		A: Future<Output = ()> + Send + Sync + 'static,
+	{
+		let mut hasher = Sha256::new();
+		let stdin = command.stdin.as_mut().unwrap();
+		// Drop key asap.
+		{
+			let mut key = [0u8; 64];
+			OsRng.fill_bytes(&mut key);
+			stdin.write_all(&key).await.map_err(Error::Io)?;
+			hasher.update(key);
+		}
+		callback_tx
+			.send(Box::pin(on_psk(
+				self.clone(),
+				key,
+				hasher.finalize()[..].to_owned(),
+			)))
+			.map_err(|_| Error::SendMessage)?;
+		Ok(())
 	}
 
 	pub async fn start(&self, process: Process) -> Result<ProcessKey> {
@@ -111,16 +143,21 @@ impl ProcessManager {
 			process.args_text()
 		);
 		let cancel_token = self.cancel_token.child_token();
-		let command = Command::new(&process.executable)
+		let callbacks = std::mem::take(&mut process.callbacks);
+		let stdin = match &callbacks.on_psk {
+			Some(_) => Stdio::piped(),
+			None => Stdio::null(),
+		};
+		let mut command = Command::new(&process.executable)
 			.args(&process.args)
 			.envs(process.env.clone())
+			.stdin(stdin)
 			.stdout(Stdio::piped())
 			.stderr(Stdio::piped())
-			.stdin(Stdio::null())
 			.kill_on_drop(true)
 			.spawn()
 			.map_err(Error::Process)?;
-		let callbacks = std::mem::take(&mut process.callbacks);
+
 		let key = inner.processes.insert(ProcessData {
 			process,
 			restarts: 0,
@@ -133,12 +170,18 @@ impl ProcessManager {
 		let (callback_tx, mut callback_rx) = mpsc::unbounded_channel();
 		tokio::spawn(async move {
 			while let Some(f) = callback_rx.recv().await {
-                f.await
-            } 
+				f.await
+			}
 		});
 		if let Some(on_start) = &callbacks.on_start {
 			let _ = callback_tx.send(on_start(self.clone(), key, false));
 		}
+		if let Some(on_psk) = &callbacks.on_psk {
+			let _ = self
+				.gen_and_send_psk(on_psk, &mut command, key, callback_tx.clone())
+				.await;
+		}
+
 		tokio::spawn(self.clone().process_loop(
 			key,
 			cancel_token.child_token(),
@@ -229,7 +272,7 @@ impl ProcessManager {
 						!ret.success() && (inner.max_restarts > process.restarts)
 					};
 					if let Some(on_exit) = &callbacks.on_exit {
-                        // wait for this to complete before potentially restarting
+						// wait for this to complete before potentially restarting
 						on_exit(self.clone(), key, ret.code(), is_restarting).await;
 					}
 					if is_restarting {
@@ -250,6 +293,9 @@ impl ProcessManager {
 								if let Some(on_start) = &callbacks.on_start {
 									let _ = callback_tx.send(on_start(self.clone(), key, true));
 								}
+								if let Some(on_psk) = &callbacks.on_psk {
+									let _ = self.gen_and_send_psk(on_psk, &mut command, key, callback_tx.clone()).await;
+								}
 								continue;
 							}
 							Err(err) => {
@@ -263,36 +309,43 @@ impl ProcessManager {
 		}
 	}
 
-    /// update the env of a managed process
-    /// changes will be applied after the process restarts
-    pub async fn update_process_env(&mut self, key: &ProcessKey, env: impl IntoIterator<Item = (impl ToString, impl ToString)>) -> Result<()> {
-        let mut r = self.inner.write().await;
-        if let Some(pdata) = r.processes.get_mut(*key) {
-            let mut new_env: Vec<(_,_)> = env
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-            pdata.process.env.retain(|(k, _)| !new_env.iter().any(|(k_new, _)| k == k_new));
-            pdata.process.env.append(&mut new_env);
-                Ok(())
-        } else {
-            Err(Error::NonExistantProcess)
-        }
-    }
+	/// update the env of a managed process
+	/// changes will be applied after the process restarts
+	pub async fn update_process_env(
+		&mut self,
+		key: &ProcessKey,
+		env: impl IntoIterator<Item = (impl ToString, impl ToString)>,
+	) -> Result<()> {
+		let mut r = self.inner.write().await;
+		if let Some(pdata) = r.processes.get_mut(*key) {
+			let mut new_env: Vec<(_, _)> = env
+				.into_iter()
+				.map(|(k, v)| (k.to_string(), v.to_string()))
+				.collect();
+			pdata
+				.process
+				.env
+				.retain(|(k, _)| !new_env.iter().any(|(k_new, _)| k == k_new));
+			pdata.process.env.append(&mut new_env);
+			Ok(())
+		} else {
+			Err(Error::NonExistantProcess)
+		}
+	}
 
-    /// update the env of a managed process
-    /// changes will be applied after the process restarts
-    pub async fn clear_process_env(&mut self, key: &ProcessKey) -> Result<()> {
-        let mut r = self.inner.write().await;
-        if let Some(pdata) = r.processes.get_mut(*key) {
-            pdata.process.env.clear();
-            Ok(())
-        } else {
-            Err(Error::NonExistantProcess)
-        }
-    }
+	/// update the env of a managed process
+	/// changes will be applied after the process restarts
+	pub async fn clear_process_env(&mut self, key: &ProcessKey) -> Result<()> {
+		let mut r = self.inner.write().await;
+		if let Some(pdata) = r.processes.get_mut(*key) {
+			pdata.process.env.clear();
+			Ok(())
+		} else {
+			Err(Error::NonExistantProcess)
+		}
+	}
 
-    // TODO methods for modifying other process data
+	// TODO methods for modifying other process data
 }
 
 struct ProcessData {

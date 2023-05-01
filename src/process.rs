@@ -5,6 +5,8 @@ use std::{borrow::Cow, future::Future, pin::Pin};
 pub type ReturnFuture = Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>;
 pub type StringCallback =
 	Box<dyn Fn(ProcessManager, ProcessKey, String) -> ReturnFuture + Send + Sync + 'static>;
+pub type PskCallback =
+	Box<dyn Fn(ProcessManager, ProcessKey, Vec<u8>) -> ReturnFuture + Send + Sync + 'static>;
 pub type StartedCallback =
 	Box<dyn Fn(ProcessManager, ProcessKey, bool) -> ReturnFuture + Send + Sync + 'static>;
 pub type ExitedCallback = Box<
@@ -17,6 +19,7 @@ pub(crate) struct ProcessCallbacks {
 	pub(crate) on_stderr: Option<StringCallback>,
 	pub(crate) on_start: Option<StartedCallback>,
 	pub(crate) on_exit: Option<ExitedCallback>,
+	pub(crate) on_psk: Option<PskCallback>,
 }
 
 #[derive(Default)]
@@ -103,6 +106,28 @@ impl Process {
 		self.callbacks.on_exit = Some(Box::new(move |p, k, code, restarting| {
 			Box::pin(on_exit(p, k, code, restarting))
 		}));
+		self
+	}
+
+	/// Sets the callback to run when a new pre-shared key (PSK) is generated.
+	/// This optionally happens when the process is started, and restarted.
+	/// The PSK is a [u8; 64] and is piped to the child process via stdin.
+	/// Though only the SHA256 has of the key is passed back here.
+	/// You can use this hash for authentication assuming:
+	///		1. The child handles the PSK safely
+	///		2. The authentication server sha256 hashes the PSK when sent to it
+	///		3. The PSK is used only once. The child process should restart
+	///		   and generate a new key if needed. The server shouldn't
+	///		   authenticate the same key twice. Ever.
+	///		4. The child should authenticate and drop the PSK as fast as possible.
+	///
+	/// It passes one argument: A Vec<u8> of the bytes of the hash of the PSK.
+	pub fn with_on_auth_key<F, A>(mut self, on_stream: F) -> Self
+	where
+		F: Fn(ProcessManager, ProcessKey, Vec<u8>) -> A + Unpin + Send + Sync + 'static,
+		A: Future<Output = ()> + Send + Sync + 'static,
+	{
+		self.callbacks.on_psk = Some(Box::new(move |p, k, byte| Box::pin(on_stream(p, k, byte))));
 		self
 	}
 

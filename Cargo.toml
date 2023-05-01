@@ -9,6 +9,8 @@ license = "MPL-2.0"
 
 [dependencies]
 log = "0.4"
+rand = "0.8.5"
+sha2 = "0.10.6"
 slotmap = "1"
 thiserror = "1"
 tokio = { version = "1", features = ["process", "sync", "rt", "macros", "io-util"] }
