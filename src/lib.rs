@@ -70,10 +70,11 @@ impl ProcessManager {
 		callback_tx: mpsc::UnboundedSender<Pin<Box<dyn Future<Output = ()> + Send + Sync>>>,
 	) -> Result<()>
 	where
-		F: Fn(ProcessManager, ProcessKey, Vec<u8>) -> A + Unpin + Send + Sync,
+		F: Fn(ProcessManager, ProcessKey, [u8; 32]) -> A + Unpin + Send + Sync,
 		A: Future<Output = ()> + Send + Sync + 'static,
 	{
 		let mut hasher = Sha256::new();
+		let mut hash = [0u8; 32];
 		let stdin = command.stdin.as_mut().unwrap();
 		// Drop key asap.
 		{
@@ -81,12 +82,13 @@ impl ProcessManager {
 			OsRng.fill_bytes(&mut key);
 			stdin.write_all(&key).await.map_err(Error::Io)?;
 			hasher.update(key);
+			hash.copy_from_slice(&hasher.finalize_reset()[..]);
 		}
 		callback_tx
 			.send(Box::pin(on_psk(
 				self.clone(),
 				key,
-				hasher.finalize()[..].to_owned(),
+				hash,
 			)))
 			.map_err(|_| Error::SendMessage)?;
 		Ok(())

@@ -6,7 +6,7 @@ pub type ReturnFuture = Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>
 pub type StringCallback =
 	Box<dyn Fn(ProcessManager, ProcessKey, String) -> ReturnFuture + Send + Sync + 'static>;
 pub type PskCallback =
-	Box<dyn Fn(ProcessManager, ProcessKey, Vec<u8>) -> ReturnFuture + Send + Sync + 'static>;
+	Box<dyn Fn(ProcessManager, ProcessKey, [u8; 32]) -> ReturnFuture + Send + Sync + 'static>;
 pub type StartedCallback =
 	Box<dyn Fn(ProcessManager, ProcessKey, bool) -> ReturnFuture + Send + Sync + 'static>;
 pub type ExitedCallback = Box<
@@ -124,7 +124,7 @@ impl Process {
 	/// It passes one argument: A Vec<u8> of the bytes of the hash of the PSK.
 	pub fn with_on_auth_key<F, A>(mut self, on_stream: F) -> Self
 	where
-		F: Fn(ProcessManager, ProcessKey, Vec<u8>) -> A + Unpin + Send + Sync + 'static,
+		F: Fn(ProcessManager, ProcessKey, [u8; 32]) -> A + Unpin + Send + Sync + 'static,
 		A: Future<Output = ()> + Send + Sync + 'static,
 	{
 		self.callbacks.on_psk = Some(Box::new(move |p, k, byte| Box::pin(on_stream(p, k, byte))));
