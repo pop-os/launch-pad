@@ -12,9 +12,9 @@ use self::{
 };
 use rand::Rng;
 use slotmap::{new_key_type, SlotMap};
-use std::{os::unix::process::ExitStatusExt, process::Stdio, sync::Arc};
+use std::{borrow::Cow, os::unix::process::ExitStatusExt, process::Stdio, sync::Arc};
 use tokio::{
-	io::{AsyncBufReadExt, BufReader},
+	io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
 	process::{Child, Command},
 	sync::{mpsc, oneshot, RwLock},
 	time::Duration,
@@ -112,11 +112,22 @@ impl ProcessManager {
 		Ok(())
 	}
 
+	/// Send a message to a process over stdin
+	pub async fn send_message(&self, key: ProcessKey, message: Cow<'static, [u8]>) -> Result<()> {
+		let inner = self.inner.read().await;
+		let process = inner.processes.get(key).ok_or(Error::NonExistantProcess)?;
+		process.process.stdin_tx.send(message).await?;
+		Ok(())
+	}
+
 	pub async fn start_process(&self, mut process: Process) -> Result<ProcessKey> {
 		if self.is_stopped() {
 			return Err(Error::Stopped);
 		}
 		let mut inner = self.inner.write().await;
+		let Some(rx) = process.stdin_rx.take() else {
+            return Err(Error::MissingStdinReceiver);
+        };
 		info!(
 			"starting process '{} {} {}'",
 			process.env_text(),
@@ -146,8 +157,8 @@ impl ProcessManager {
 		let (callback_tx, mut callback_rx) = mpsc::unbounded_channel();
 		tokio::spawn(async move {
 			while let Some(f) = callback_rx.recv().await {
-                f.await
-            } 
+				f.await
+			}
 		});
 		if let Some(on_start) = &callbacks.on_start {
 			let _ = callback_tx.send(on_start(self.clone(), key, false));
@@ -158,6 +169,7 @@ impl ProcessManager {
 			command,
 			callbacks,
 			callback_tx,
+			rx,
 		));
 		Ok(key)
 	}
@@ -191,7 +203,7 @@ impl ProcessManager {
 			.envs(process_data.process.env.clone())
 			.stdout(Stdio::piped())
 			.stderr(Stdio::piped())
-			.stdin(Stdio::null())
+			.stdin(Stdio::piped())
 			.kill_on_drop(true)
 			.spawn()
 			.map_err(Error::Process)?;
@@ -213,6 +225,7 @@ impl ProcessManager {
 		mut command: Child,
 		callbacks: ProcessCallbacks,
 		callback_tx: mpsc::UnboundedSender<ReturnFuture>,
+		mut stdin_rx: mpsc::Receiver<Cow<'static, [u8]>>,
 	) {
 		let (mut stdout, mut stderr) = match (command.stdout.take(), command.stderr.take()) {
 			(Some(stdout), Some(stderr)) => (
@@ -232,6 +245,13 @@ impl ProcessManager {
 					command.kill().await.expect("failed to kill program");
 					break;
 				},
+				Some(message) = stdin_rx.recv() => {
+					if let Err(err) = command.stdin.as_mut()
+						.expect("No stdin in process, even though we should be piping it")
+						.write_all(&message).await {
+						error!("failed to write to stdin of process '{:?}': {}", key, err);
+					}
+				}
 				Ok(Some(stdout_line)) = stdout.next_line() => {
 					if let Some(on_stdout) = &callbacks.on_stdout {
 						let _ = callback_tx.send(on_stdout(self.clone(), key, stdout_line));
@@ -260,10 +280,13 @@ impl ProcessManager {
 						!ret.success() && (inner.max_restarts > process.restarts)
 					};
 					if let Some(on_exit) = &callbacks.on_exit {
-                        // wait for this to complete before potentially restarting
+						// wait for this to complete before potentially restarting
 						on_exit(self.clone(), key, ret.code(), is_restarting).await;
 					}
 					if is_restarting {
+						// drain stdin receiver before restarting
+						while let Some(_) = stdin_rx.recv().await {}
+
 						match self.restart_process(key).await {
 							Ok(new_command) =>  {
 								command = new_command;
@@ -294,36 +317,43 @@ impl ProcessManager {
 		}
 	}
 
-    /// update the env of a managed process
-    /// changes will be applied after the process restarts
-    pub async fn update_process_env(&mut self, key: &ProcessKey, env: impl IntoIterator<Item = (impl ToString, impl ToString)>) -> Result<()> {
-        let mut r = self.inner.write().await;
-        if let Some(pdata) = r.processes.get_mut(*key) {
-            let mut new_env: Vec<(_,_)> = env
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-            pdata.process.env.retain(|(k, _)| !new_env.iter().any(|(k_new, _)| k == k_new));
-            pdata.process.env.append(&mut new_env);
-                Ok(())
-        } else {
-            Err(Error::NonExistantProcess)
-        }
-    }
+	/// update the env of a managed process
+	/// changes will be applied after the process restarts
+	pub async fn update_process_env(
+		&mut self,
+		key: &ProcessKey,
+		env: impl IntoIterator<Item = (impl ToString, impl ToString)>,
+	) -> Result<()> {
+		let mut r = self.inner.write().await;
+		if let Some(pdata) = r.processes.get_mut(*key) {
+			let mut new_env: Vec<(_, _)> = env
+				.into_iter()
+				.map(|(k, v)| (k.to_string(), v.to_string()))
+				.collect();
+			pdata
+				.process
+				.env
+				.retain(|(k, _)| !new_env.iter().any(|(k_new, _)| k == k_new));
+			pdata.process.env.append(&mut new_env);
+			Ok(())
+		} else {
+			Err(Error::NonExistantProcess)
+		}
+	}
 
-    /// update the env of a managed process
-    /// changes will be applied after the process restarts
-    pub async fn clear_process_env(&mut self, key: &ProcessKey) -> Result<()> {
-        let mut r = self.inner.write().await;
-        if let Some(pdata) = r.processes.get_mut(*key) {
-            pdata.process.env.clear();
-            Ok(())
-        } else {
-            Err(Error::NonExistantProcess)
-        }
-    }
+	/// update the env of a managed process
+	/// changes will be applied after the process restarts
+	pub async fn clear_process_env(&mut self, key: &ProcessKey) -> Result<()> {
+		let mut r = self.inner.write().await;
+		if let Some(pdata) = r.processes.get_mut(*key) {
+			pdata.process.env.clear();
+			Ok(())
+		} else {
+			Err(Error::NonExistantProcess)
+		}
+	}
 
-    // TODO methods for modifying other process data
+	// TODO methods for modifying other process data
 }
 
 struct ProcessData {

@@ -1,3 +1,5 @@
+use tokio::sync::mpsc;
+
 // SPDX-License-Identifier: MPL-2.0
 use super::{ProcessKey, ProcessManager};
 use std::{borrow::Cow, future::Future, pin::Pin};
@@ -19,17 +21,26 @@ pub(crate) struct ProcessCallbacks {
 	pub(crate) on_exit: Option<ExitedCallback>,
 }
 
-#[derive(Default)]
 pub struct Process {
 	pub(crate) executable: String,
 	pub(crate) args: Vec<String>,
 	pub(crate) env: Vec<(String, String)>,
 	pub(crate) callbacks: ProcessCallbacks,
+	pub(crate) stdin_tx: mpsc::Sender<Cow<'static, [u8]>>,
+	pub(crate) stdin_rx: Option<mpsc::Receiver<Cow<'static, [u8]>>>,
 }
 
 impl Process {
 	pub fn new() -> Self {
-		Self::default()
+		let (stdin_tx, stdin_rx) = mpsc::channel(10);
+		Self {
+			executable: String::new(),
+			args: Vec::new(),
+			env: Vec::new(),
+			callbacks: ProcessCallbacks::default(),
+			stdin_tx,
+			stdin_rx: Some(stdin_rx),
+		}
 	}
 
 	/// Sets the executable to run.
