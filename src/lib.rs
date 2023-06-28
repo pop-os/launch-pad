@@ -10,12 +10,14 @@ use self::{
 	error::{Error, Result},
 	process::{Process, ProcessCallbacks, ReturnFuture},
 };
+use rand::Rng;
 use slotmap::{new_key_type, SlotMap};
 use std::{os::unix::process::ExitStatusExt, process::Stdio, sync::Arc};
 use tokio::{
 	io::{AsyncBufReadExt, BufReader},
 	process::{Child, Command},
 	sync::{mpsc, oneshot, RwLock},
+	time::Duration,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -33,6 +35,7 @@ impl ProcessManager {
 		let (tx, mut rx) = mpsc::unbounded_channel();
 		let cancel = CancellationToken::new();
 		let inner = Arc::new(RwLock::new(ProcessManagerInner {
+			restart_mode: RestartMode::Instant,
 			max_restarts: 3,
 			processes: SlotMap::with_key(),
 		}));
@@ -64,6 +67,16 @@ impl ProcessManager {
 		let (return_tx, return_rx) = oneshot::channel();
 		let _ = self.tx.send((process, return_tx));
 		return_rx.await?
+	}
+
+	/// Returns the current restart mode.
+	pub async fn restart_mode(&self) -> RestartMode {
+		self.inner.read().await.restart_mode
+	}
+
+	/// Sets the restart mode.
+	pub async fn set_restart_mode(&self, restart_mode: RestartMode) {
+		self.inner.write().await.restart_mode = restart_mode;
 	}
 
 	/// Returns the maximum amount of times a process can be restarted before
@@ -151,10 +164,28 @@ impl ProcessManager {
 
 	async fn restart_process(&self, process_key: ProcessKey) -> Result<Child> {
 		let mut inner = self.inner.write().await;
+		let restart_mode = inner.restart_mode;
 		let process_data = inner
 			.processes
 			.get_mut(process_key)
 			.ok_or(Error::InvalidProcess(process_key))?;
+
+		// delay before restarting
+		match restart_mode {
+			RestartMode::ExponentialBackoff(backoff) => {
+				let backoff = backoff.as_millis() as u64;
+				let jittered_delay: u64 = rand::thread_rng().gen_range(0..backoff);
+				let backoff = Duration::from_millis(
+					2_u64.saturating_pow(process_data.restarts as u32) * jittered_delay,
+				);
+				tokio::time::sleep(backoff).await;
+			}
+			RestartMode::Delayed(backoff) => {
+				tokio::time::sleep(backoff).await;
+			}
+			RestartMode::Instant => {}
+		}
+
 		let command = Command::new(&process_data.process.executable)
 			.args(&process_data.process.args)
 			.envs(process_data.process.env.clone())
@@ -302,6 +333,14 @@ struct ProcessData {
 }
 
 struct ProcessManagerInner {
+	restart_mode: RestartMode,
 	max_restarts: usize,
 	processes: SlotMap<ProcessKey, ProcessData>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum RestartMode {
+	Instant,
+	Delayed(Duration),
+	ExponentialBackoff(Duration),
 }
