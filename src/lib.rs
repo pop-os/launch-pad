@@ -134,27 +134,42 @@ impl ProcessManager {
 			process.exe_text(),
 			process.args_text()
 		);
+		let callbacks = std::mem::take(&mut process.callbacks);
+		let (callback_tx, mut callback_rx) = mpsc::unbounded_channel();
+
 		let cancel_token = self.cancel_token.child_token();
-		let command = Command::new(&process.executable)
-			.args(&process.args)
-			.envs(process.env.clone())
+
+		let key = inner.processes.insert(ProcessData {
+			process,
+			restarts: 0,
+			cancel_token: cancel_token.clone(),
+		});
+		let process = inner.processes.get(key).unwrap();
+		if let Some(on_start) = &callbacks.pre_start {
+			on_start(self.clone(), key, false);
+		}
+		let command = Command::new(&process.process.executable)
+			.args(&process.process.args)
+			.envs(
+				process
+					.process
+					.env
+					.iter()
+					.map(|(k, v)| (k.as_str(), v.as_str())),
+			)
 			.stdout(Stdio::piped())
 			.stderr(Stdio::piped())
 			.stdin(Stdio::null())
 			.kill_on_drop(true)
 			.spawn()
 			.map_err(Error::Process)?;
-		let callbacks = std::mem::take(&mut process.callbacks);
-		let key = inner.processes.insert(ProcessData {
-			process,
-			restarts: 0,
-			cancel_token: cancel_token.clone(),
-		});
+		if let Some(on_start) = &callbacks.post_start {
+			on_start(self.clone(), key, false);
+		}
 		// This adds futures into a queue and executes them in a separate task, in order
 		// to both ensure execution of callbacks is in the same order the events are
 		// received, and to avoid blocking the reception of events if a callback is slow
 		// to return.
-		let (callback_tx, mut callback_rx) = mpsc::unbounded_channel();
 		tokio::spawn(async move {
 			while let Some(f) = callback_rx.recv().await {
 				f.await
