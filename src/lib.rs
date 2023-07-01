@@ -253,6 +253,10 @@ impl ProcessManager {
 				panic!("no stdout or stderr in process, even though we should be piping it")
 			}
 		};
+		let mut stdin = command
+			.stdin
+			.take()
+			.expect("No stdin in process, even though we should be piping it");
 		loop {
 			tokio::select! {
 				_ = cancel_token.cancelled() => {
@@ -261,9 +265,8 @@ impl ProcessManager {
 					break;
 				},
 				Some(message) = stdin_rx.recv() => {
-					if let Err(err) = command.stdin.as_mut()
-						.expect("No stdin in process, even though we should be piping it")
-						.write_all(&message).await {
+					if let Err(err) =
+						stdin.write_all(&message).await {
 						error!("failed to write to stdin of process '{:?}': {}", key, err);
 					}
 				}
