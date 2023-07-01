@@ -2,7 +2,7 @@ use tokio::sync::mpsc;
 
 // SPDX-License-Identifier: MPL-2.0
 use super::{ProcessKey, ProcessManager};
-use std::{borrow::Cow, future::Future, pin::Pin};
+use std::{borrow::Cow, future::Future, os::fd::RawFd, pin::Pin};
 
 pub type ReturnFuture = Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>;
 pub type ReturnB = Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>;
@@ -21,12 +21,7 @@ pub(crate) struct ProcessCallbacks {
 	pub(crate) on_stderr: Option<StringCallback>,
 	pub(crate) on_start: Option<StartedCallback>,
 	pub(crate) on_exit: Option<ExitedCallback>,
-	/// This is called immediately after the process is started.
-	/// Not entered into the callback queue like others.
-	pub(crate) post_start: Option<BlockingCallback>,
-	/// This is called just before the process is started.
-	/// Not entered into the callback queue like others.
-	pub(crate) pre_start: Option<BlockingCallback>,
+	pub(crate) fds: Option<Box<dyn Fn() -> Vec<RawFd> + Send + Sync + 'static>>,
 }
 
 pub struct Process {
@@ -95,33 +90,13 @@ impl Process {
 		self
 	}
 
-	/// Sets the callback to run before the process starts.
-	/// This is called before the process is started.
-	///
-	/// It passes a single argument: a bool indicating whether the process was
-	/// restarted or if it was started for the first time.
-	///
-	/// This callback is blocking.
-	pub fn with_pre_start<F>(mut self, pre_start: F) -> Self
+	/// Shares Fds with the child process
+	/// Closure produces a vector of Fd to share with the child process
+	pub fn with_fds<F>(mut self, fds: F) -> Self
 	where
-		F: Fn(ProcessManager, ProcessKey, bool) + Send + Sync + 'static,
+		F: Fn() -> Vec<RawFd> + Send + Sync + 'static,
 	{
-		self.callbacks.pre_start = Some(Box::new(move |p, k, r| pre_start(p, k, r)));
-		self
-	}
-
-	/// Sets the callback to run after the process starts.
-	/// This is called after the process is started.
-	///
-	/// It passes a single argument: a bool indicating whether the process was
-	/// restarted or if it was started for the first time.
-	///
-	/// This callback is blocking.
-	pub fn with_post_start<F>(mut self, post_start: F) -> Self
-	where
-		F: Fn(ProcessManager, ProcessKey, bool) + Send + Sync + 'static,
-	{
-		self.callbacks.post_start = Some(Box::new(move |p, k, r| post_start(p, k, r)));
+		self.callbacks.fds = Some(Box::new(fds));
 		self
 	}
 

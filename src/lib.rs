@@ -5,6 +5,7 @@ extern crate log;
 pub mod error;
 pub mod message;
 pub mod process;
+pub mod util;
 
 use self::{
 	error::{Error, Result},
@@ -145,27 +146,49 @@ impl ProcessManager {
 			cancel_token: cancel_token.clone(),
 		});
 		let process = inner.processes.get(key).unwrap();
-		if let Some(on_start) = &callbacks.pre_start {
-			on_start(self.clone(), key, false);
+
+		let mut command = Command::new(&process.process.executable);
+
+		let command = unsafe {
+			command
+				.args(&process.process.args)
+				.envs(
+					process
+						.process
+						.env
+						.iter()
+						.map(|(k, v)| (k.as_str(), v.as_str())),
+				)
+				.stdout(Stdio::piped())
+				.stderr(Stdio::piped())
+				.stdin(Stdio::piped())
+				.kill_on_drop(true)
+				.pre_exec({
+					let fd_list = if let Some(fds) = callbacks.fds.as_ref() {
+						fds()
+					} else {
+						Vec::new()
+					};
+
+					move || {
+						for fd in &fd_list {
+							util::mark_as_not_cloexec(*fd)?;
+						}
+						Ok(())
+					}
+				})
+				.spawn()
+				.map_err(Error::Process)?
+		};
+		if let Some(fds) = process.process.callbacks.fds.as_ref() {
+			let fd_list = fds();
+			for fd in fd_list {
+				if let Err(err) = util::mark_as_cloexec(fd) {
+					error!("failed to mark fd {} as cloexec: {}", fd, err);
+				}
+			}
 		}
-		let command = Command::new(&process.process.executable)
-			.args(&process.process.args)
-			.envs(
-				process
-					.process
-					.env
-					.iter()
-					.map(|(k, v)| (k.as_str(), v.as_str())),
-			)
-			.stdout(Stdio::piped())
-			.stderr(Stdio::piped())
-			.stdin(Stdio::piped())
-			.kill_on_drop(true)
-			.spawn()
-			.map_err(Error::Process)?;
-		if let Some(on_start) = &callbacks.post_start {
-			on_start(self.clone(), key, false);
-		}
+
 		// This adds futures into a queue and executes them in a separate task, in order
 		// to both ensure execution of callbacks is in the same order the events are
 		// received, and to avoid blocking the reception of events if a callback is slow
@@ -189,7 +212,11 @@ impl ProcessManager {
 		Ok(key)
 	}
 
-	async fn restart_process(&self, process_key: ProcessKey) -> Result<Child> {
+	async fn restart_process(
+		&self,
+		process_key: ProcessKey,
+		callbacks: &ProcessCallbacks,
+	) -> Result<Child> {
 		let mut inner = self.inner.write().await;
 		let restart_mode = inner.restart_mode;
 		let process_data = inner
@@ -213,15 +240,30 @@ impl ProcessManager {
 			RestartMode::Instant => {}
 		}
 
-		let command = Command::new(&process_data.process.executable)
-			.args(&process_data.process.args)
-			.envs(process_data.process.env.clone())
-			.stdout(Stdio::piped())
-			.stderr(Stdio::piped())
-			.stdin(Stdio::piped())
-			.kill_on_drop(true)
-			.spawn()
-			.map_err(Error::Process)?;
+		let command = unsafe {
+			Command::new(&process_data.process.executable)
+				.args(&process_data.process.args)
+				.envs(process_data.process.env.clone())
+				.stdout(Stdio::piped())
+				.stderr(Stdio::piped())
+				.stdin(Stdio::piped())
+				.kill_on_drop(true)
+				.pre_exec({
+					let fd_list = if let Some(fds) = callbacks.fds.as_ref() {
+						fds()
+					} else {
+						Vec::new()
+					};
+					move || {
+						for fd in &fd_list {
+							util::mark_as_not_cloexec(*fd)?;
+						}
+						Ok(())
+					}
+				})
+				.spawn()
+				.map_err(Error::Process)?
+		};
 		process_data.restarts += 1;
 		info!(
 			"restarted process '{} {} {}', now at {} restarts",
@@ -305,7 +347,7 @@ impl ProcessManager {
 						// drain stdin receiver before restarting
 						while let Some(_) = stdin_rx.recv().await {}
 
-						match self.restart_process(key).await {
+						match self.restart_process(key, &callbacks).await {
 							Ok(new_command) =>  {
 								command = new_command;
 								(stdout, stderr) = match (command.stdout.take(), command.stderr.take()) {
