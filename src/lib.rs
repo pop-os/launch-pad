@@ -159,7 +159,7 @@ impl ProcessManager {
 			)
 			.stdout(Stdio::piped())
 			.stderr(Stdio::piped())
-			.stdin(Stdio::null())
+			.stdin(Stdio::piped())
 			.kill_on_drop(true)
 			.spawn()
 			.map_err(Error::Process)?;
