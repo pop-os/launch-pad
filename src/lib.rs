@@ -230,11 +230,26 @@ impl ProcessManager {
 				let backoff = backoff.as_millis() as u64;
 				let jittered_delay: u64 = rand::thread_rng().gen_range(0..backoff);
 				let backoff = Duration::from_millis(
-					2_u64.saturating_pow(process_data.restarts as u32) * jittered_delay,
+					2_u64
+						.saturating_pow(process_data.restarts as u32)
+						.saturating_mul(jittered_delay),
 				);
+				info!(
+					"sleeping for {}ms before restarting process {} (restart {})",
+					backoff.as_millis(),
+					process_data.process.executable,
+					process_data.restarts
+				);
+
 				tokio::time::sleep(backoff).await;
 			}
 			RestartMode::Delayed(backoff) => {
+				info!(
+					"sleeping for {}ms before restarting process {} (restart {})",
+					backoff.as_millis(),
+					process_data.process.executable,
+					process_data.restarts
+				);
 				tokio::time::sleep(backoff).await;
 			}
 			RestartMode::Instant => {}
@@ -344,8 +359,8 @@ impl ProcessManager {
 						on_exit(self.clone(), key, ret.code(), is_restarting).await;
 					}
 					if is_restarting {
-						// drain stdin receiver before restarting
-						while let Some(_) = stdin_rx.recv().await {}
+						info!("draining stdin receiver before restarting process");
+						while let Ok(_) = stdin_rx.try_recv() {}
 
 						match self.restart_process(key, &callbacks).await {
 							Ok(new_command) =>  {
