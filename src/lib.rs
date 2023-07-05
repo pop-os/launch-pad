@@ -147,8 +147,13 @@ impl ProcessManager {
 		});
 		let process = inner.processes.get(key).unwrap();
 
-		let mut command = Command::new(&process.process.executable);
+		let fd_list = if let Some(fds) = callbacks.fds.as_ref() {
+			fds()
+		} else {
+			Vec::new()
+		};
 
+		let mut command = Command::new(&process.process.executable);
 		let command = unsafe {
 			command
 				.args(&process.process.args)
@@ -163,31 +168,15 @@ impl ProcessManager {
 				.stderr(Stdio::piped())
 				.stdin(Stdio::piped())
 				.kill_on_drop(true)
-				.pre_exec({
-					let fd_list = if let Some(fds) = callbacks.fds.as_ref() {
-						fds()
-					} else {
-						Vec::new()
-					};
-
-					move || {
-						for fd in &fd_list {
-							util::mark_as_not_cloexec(*fd)?;
-						}
-						Ok(())
+				.pre_exec(move || {
+					for fd in &fd_list {
+						util::mark_as_not_cloexec(*fd)?;
 					}
+					Ok(())
 				})
 				.spawn()
 				.map_err(Error::Process)?
 		};
-		if let Some(fds) = process.process.callbacks.fds.as_ref() {
-			let fd_list = fds();
-			for fd in fd_list {
-				if let Err(err) = util::mark_as_cloexec(fd) {
-					error!("failed to mark fd {} as cloexec: {}", fd, err);
-				}
-			}
-		}
 
 		// This adds futures into a queue and executes them in a separate task, in order
 		// to both ensure execution of callbacks is in the same order the events are
@@ -254,7 +243,11 @@ impl ProcessManager {
 			}
 			RestartMode::Instant => {}
 		}
-
+		let fd_list = if let Some(fds) = callbacks.fds.as_ref() {
+			fds()
+		} else {
+			Vec::new()
+		};
 		let command = unsafe {
 			Command::new(&process_data.process.executable)
 				.args(&process_data.process.args)
@@ -263,18 +256,11 @@ impl ProcessManager {
 				.stderr(Stdio::piped())
 				.stdin(Stdio::piped())
 				.kill_on_drop(true)
-				.pre_exec({
-					let fd_list = if let Some(fds) = callbacks.fds.as_ref() {
-						fds()
-					} else {
-						Vec::new()
-					};
-					move || {
-						for fd in &fd_list {
-							util::mark_as_not_cloexec(*fd)?;
-						}
-						Ok(())
+				.pre_exec(move || {
+					for fd in &fd_list {
+						util::mark_as_not_cloexec(*fd)?;
 					}
+					Ok(())
 				})
 				.spawn()
 				.map_err(Error::Process)?
