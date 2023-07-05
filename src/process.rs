@@ -1,8 +1,11 @@
+use tokio::sync::mpsc;
+
 // SPDX-License-Identifier: MPL-2.0
 use super::{ProcessKey, ProcessManager};
-use std::{borrow::Cow, future::Future, pin::Pin};
+use std::{borrow::Cow, future::Future, os::fd::RawFd, pin::Pin};
 
 pub type ReturnFuture = Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>;
+pub type ReturnB = Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>;
 pub type StringCallback =
 	Box<dyn Fn(ProcessManager, ProcessKey, String) -> ReturnFuture + Send + Sync + 'static>;
 pub type StartedCallback =
@@ -10,6 +13,7 @@ pub type StartedCallback =
 pub type ExitedCallback = Box<
 	dyn Fn(ProcessManager, ProcessKey, Option<i32>, bool) -> ReturnFuture + Send + Sync + 'static,
 >;
+pub type BlockingCallback = Box<dyn Fn(ProcessManager, ProcessKey, bool) + Send + Sync + 'static>;
 
 #[derive(Default)]
 pub(crate) struct ProcessCallbacks {
@@ -17,19 +21,29 @@ pub(crate) struct ProcessCallbacks {
 	pub(crate) on_stderr: Option<StringCallback>,
 	pub(crate) on_start: Option<StartedCallback>,
 	pub(crate) on_exit: Option<ExitedCallback>,
+	pub(crate) fds: Option<Box<dyn Fn() -> Vec<RawFd> + Send + Sync + 'static>>,
 }
 
-#[derive(Default)]
 pub struct Process {
 	pub(crate) executable: String,
 	pub(crate) args: Vec<String>,
 	pub(crate) env: Vec<(String, String)>,
 	pub(crate) callbacks: ProcessCallbacks,
+	pub(crate) stdin_tx: mpsc::Sender<Cow<'static, [u8]>>,
+	pub(crate) stdin_rx: Option<mpsc::Receiver<Cow<'static, [u8]>>>,
 }
 
 impl Process {
 	pub fn new() -> Self {
-		Self::default()
+		let (stdin_tx, stdin_rx) = mpsc::channel(10);
+		Self {
+			executable: String::new(),
+			args: Vec::new(),
+			env: Vec::new(),
+			callbacks: ProcessCallbacks::default(),
+			stdin_tx,
+			stdin_rx: Some(stdin_rx),
+		}
 	}
 
 	/// Sets the executable to run.
@@ -76,8 +90,17 @@ impl Process {
 		self
 	}
 
-	/// Sets the callback to run when the process starts.
-	/// This is called before the process is started.
+	/// Shares Fds with the child process
+	/// Closure produces a vector of Fd to share with the child process
+	pub fn with_fds<F>(mut self, fds: F) -> Self
+	where
+		F: Fn() -> Vec<RawFd> + Send + Sync + 'static,
+	{
+		self.callbacks.fds = Some(Box::new(fds));
+		self
+	}
+
+	/// This is called when the process is started.
 	///
 	/// It passes a single argument: a bool indicating whether the process was
 	/// restarted or if it was started for the first time.
