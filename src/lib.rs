@@ -362,6 +362,10 @@ impl ProcessManager {
 										panic!("no stdout or stderr in process, even though we should be piping it")
 									}
 								};
+								stdin = command
+									.stdin
+									.take()
+									.expect("No stdin in process, even though we should be piping it");
 								if let Some(on_start) = &callbacks.on_start {
 									let _ = callback_tx.send(on_start(self.clone(), key, true));
 								}
