@@ -13,7 +13,12 @@ use self::{
 };
 use rand::Rng;
 use slotmap::{new_key_type, SlotMap};
-use std::{borrow::Cow, os::unix::process::ExitStatusExt, process::Stdio, sync::Arc};
+use std::{
+	borrow::Cow,
+	os::{fd::RawFd, unix::process::ExitStatusExt},
+	process::Stdio,
+	sync::Arc,
+};
 use tokio::{
 	io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
 	process::{Child, Command},
@@ -400,6 +405,19 @@ impl ProcessManager {
 				.env
 				.retain(|(k, _)| !new_env.iter().any(|(k_new, _)| k == k_new));
 			pdata.process.env.append(&mut new_env);
+			Ok(())
+		} else {
+			Err(Error::NonExistantProcess)
+		}
+	}
+
+	pub async fn update_process_fds<F>(&mut self, key: &ProcessKey, f: F) -> Result<()>
+	where
+		F: Fn() -> Vec<RawFd> + Send + Sync + 'static,
+	{
+		let mut r = self.inner.write().await;
+		if let Some(pdata) = r.processes.get_mut(*key) {
+			pdata.process.callbacks.fds = Some(Box::new(f));
 			Ok(())
 		} else {
 			Err(Error::NonExistantProcess)
