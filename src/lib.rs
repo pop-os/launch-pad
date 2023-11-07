@@ -132,8 +132,8 @@ impl ProcessManager {
 		}
 		let mut inner = self.inner.write().await;
 		let Some(rx) = process.stdin_rx.take() else {
-            return Err(Error::MissingStdinReceiver);
-        };
+			return Err(Error::MissingStdinReceiver);
+		};
 		info!(
 			"starting process '{} {} {}'",
 			process.env_text(),
@@ -206,11 +206,7 @@ impl ProcessManager {
 		Ok(key)
 	}
 
-	async fn restart_process(
-		&self,
-		process_key: ProcessKey,
-		callbacks: &ProcessCallbacks,
-	) -> Result<Child> {
+	async fn restart_process(&self, process_key: ProcessKey) -> Result<Child> {
 		let mut inner = self.inner.write().await;
 		let restart_mode = inner.restart_mode;
 		let process_data = inner
@@ -248,7 +244,8 @@ impl ProcessManager {
 			}
 			RestartMode::Instant => {}
 		}
-		let fd_list = if let Some(fds) = callbacks.fds.as_ref() {
+		let fd_callback = process_data.process.callbacks.fds.take();
+		let fd_list = if let Some(fds) = fd_callback.as_ref() {
 			fds()
 		} else {
 			Vec::new()
@@ -353,7 +350,7 @@ impl ProcessManager {
 						info!("draining stdin receiver before restarting process");
 						while let Ok(_) = stdin_rx.try_recv() {}
 
-						match self.restart_process(key, &callbacks).await {
+						match self.restart_process(key).await {
 							Ok(new_command) =>  {
 								command = new_command;
 								(stdout, stderr) = match (command.stdout.take(), command.stderr.take()) {
