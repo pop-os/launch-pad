@@ -15,7 +15,10 @@ use rand::Rng;
 use slotmap::{new_key_type, SlotMap};
 use std::{
 	borrow::Cow,
-	os::{fd::RawFd, unix::process::ExitStatusExt},
+	os::{
+		fd::{AsRawFd, OwnedFd},
+		unix::process::ExitStatusExt,
+	},
 	process::Stdio,
 	sync::Arc,
 };
@@ -140,7 +143,7 @@ impl ProcessManager {
 			process.exe_text(),
 			process.args_text()
 		);
-		let callbacks = std::mem::take(&mut process.callbacks);
+		let mut callbacks = std::mem::take(&mut process.callbacks);
 		let (callback_tx, mut callback_rx) = mpsc::unbounded_channel();
 
 		let cancel_token = self.cancel_token.child_token();
@@ -152,11 +155,12 @@ impl ProcessManager {
 		});
 		let process = inner.processes.get(key).unwrap();
 
-		let fd_list = if let Some(fds) = callbacks.fds.as_ref() {
+		let fd_list = if let Some(mut fds) = callbacks.fds.take() {
 			fds()
 		} else {
 			Vec::new()
 		};
+		let raw_fds = fd_list.iter().map(|fd| fd.as_raw_fd()).collect::<Vec<_>>();
 
 		let mut command = Command::new(&process.process.executable);
 		let command = unsafe {
@@ -174,7 +178,7 @@ impl ProcessManager {
 				.stdin(Stdio::piped())
 				.kill_on_drop(true)
 				.pre_exec(move || {
-					for fd in &fd_list {
+					for fd in &raw_fds {
 						util::mark_as_not_cloexec(*fd)?;
 					}
 					Ok(())
@@ -182,6 +186,7 @@ impl ProcessManager {
 				.spawn()
 				.map_err(Error::Process)?
 		};
+		drop(fd_list);
 
 		// This adds futures into a queue and executes them in a separate task, in order
 		// to both ensure execution of callbacks is in the same order the events are
@@ -244,12 +249,13 @@ impl ProcessManager {
 			}
 			RestartMode::Instant => {}
 		}
-		let fd_callback = process_data.process.callbacks.fds.take();
-		let fd_list = if let Some(fds) = fd_callback.as_ref() {
+		let mut fd_callback = process_data.process.callbacks.fds.take();
+		let fd_list = if let Some(mut fds) = fd_callback.take() {
 			fds()
 		} else {
 			Vec::new()
 		};
+		let raw_fds = fd_list.iter().map(|fd| fd.as_raw_fd()).collect::<Vec<_>>();
 		let command = unsafe {
 			Command::new(&process_data.process.executable)
 				.args(&process_data.process.args)
@@ -259,7 +265,7 @@ impl ProcessManager {
 				.stdin(Stdio::piped())
 				.kill_on_drop(true)
 				.pre_exec(move || {
-					for fd in &fd_list {
+					for fd in &raw_fds {
 						util::mark_as_not_cloexec(*fd)?;
 					}
 					Ok(())
@@ -267,6 +273,8 @@ impl ProcessManager {
 				.spawn()
 				.map_err(Error::Process)?
 		};
+		drop(fd_list);
+
 		process_data.restarts += 1;
 		info!(
 			"restarted process '{} {} {}', now at {} restarts",
@@ -410,7 +418,7 @@ impl ProcessManager {
 
 	pub async fn update_process_fds<F>(&mut self, key: &ProcessKey, f: F) -> Result<()>
 	where
-		F: Fn() -> Vec<RawFd> + Send + Sync + 'static,
+		F: FnOnce() -> Vec<OwnedFd> + Send + Sync + 'static,
 	{
 		let mut r = self.inner.write().await;
 		if let Some(pdata) = r.processes.get_mut(*key) {

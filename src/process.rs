@@ -2,7 +2,7 @@ use tokio::sync::mpsc;
 
 // SPDX-License-Identifier: MPL-2.0
 use super::{ProcessKey, ProcessManager};
-use std::{borrow::Cow, future::Future, os::fd::RawFd, pin::Pin};
+use std::{borrow::Cow, future::Future, os::fd::OwnedFd, pin::Pin};
 
 pub type ReturnFuture = Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>;
 pub type ReturnB = Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>;
@@ -21,7 +21,7 @@ pub(crate) struct ProcessCallbacks {
 	pub(crate) on_stderr: Option<StringCallback>,
 	pub(crate) on_start: Option<StartedCallback>,
 	pub(crate) on_exit: Option<ExitedCallback>,
-	pub(crate) fds: Option<Box<dyn Fn() -> Vec<RawFd> + Send + Sync + 'static>>,
+	pub(crate) fds: Option<Box<dyn FnOnce() -> Vec<OwnedFd> + Send + Sync + 'static>>,
 }
 
 pub struct Process {
@@ -94,7 +94,7 @@ impl Process {
 	/// Closure produces a vector of Fd to share with the child process
 	pub fn with_fds<F>(mut self, fds: F) -> Self
 	where
-		F: Fn() -> Vec<RawFd> + Send + Sync + 'static,
+		F: FnOnce() -> Vec<OwnedFd> + Send + Sync + 'static,
 	{
 		self.callbacks.fds = Some(Box::new(fds));
 		self
