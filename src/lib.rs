@@ -150,10 +150,11 @@ impl ProcessManager {
 
 		let key = inner.processes.insert(ProcessData {
 			process,
+			pid: None,
 			restarts: 0,
 			cancel_token: cancel_token.clone(),
 		});
-		let process = inner.processes.get(key).unwrap();
+		let process = inner.processes.get_mut(key).unwrap();
 
 		let fd_list = if let Some(mut fds) = callbacks.fds.take() {
 			fds()
@@ -187,7 +188,7 @@ impl ProcessManager {
 				.map_err(Error::Process)?
 		};
 		drop(fd_list);
-
+		process.pid = command.id();
 		// This adds futures into a queue and executes them in a separate task, in order
 		// to both ensure execution of callbacks is in the same order the events are
 		// received, and to avoid blocking the reception of events if a callback is slow
@@ -209,6 +210,15 @@ impl ProcessManager {
 			rx,
 		));
 		Ok(key)
+	}
+
+	pub async fn get_pid(&self, key: ProcessKey) -> Result<Option<u32>> {
+		let inner = self.inner.read().await;
+		Ok(inner
+			.processes
+			.get(key)
+			.ok_or(error::Error::NonExistantProcess)?
+			.pid)
 	}
 
 	async fn restart_process(&self, process_key: ProcessKey) -> Result<Child> {
@@ -273,6 +283,7 @@ impl ProcessManager {
 				.spawn()
 				.map_err(Error::Process)?
 		};
+		process_data.pid = command.id();
 		drop(fd_list);
 
 		process_data.restarts += 1;
@@ -446,6 +457,7 @@ impl ProcessManager {
 
 struct ProcessData {
 	process: Process,
+	pid: Option<u32>,
 	restarts: usize,
 	cancel_token: CancellationToken,
 }
