@@ -10,6 +10,9 @@ pub type StringCallback =
 	Box<dyn Fn(ProcessManager, ProcessKey, String) -> ReturnFuture + Send + Sync + 'static>;
 pub type StartedCallback =
 	Box<dyn Fn(ProcessManager, ProcessKey, bool) -> ReturnFuture + Send + Sync + 'static>;
+/// Type for the callback that is called when a process exits. Arguments are the
+/// process manager, the process key, the error code to return, and a
+/// bool indicating if the process is going to be restarted.
 pub type ExitedCallback = Box<
 	dyn Fn(ProcessManager, ProcessKey, Option<i32>, bool) -> ReturnFuture + Send + Sync + 'static,
 >;

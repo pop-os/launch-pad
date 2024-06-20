@@ -35,6 +35,9 @@ new_key_type! { pub struct ProcessKey; }
 #[derive(Clone)]
 pub struct ProcessManager {
 	inner: Arc<RwLock<ProcessManagerInner>>,
+	/// Transmitter for ProcessManager instances
+	/// a Process will be sent to the main loop for spawning
+	/// and a key will be sent back to the caller
 	tx: mpsc::UnboundedSender<(Process, oneshot::Sender<Result<ProcessKey>>)>,
 	cancel_token: CancellationToken,
 }
@@ -72,8 +75,11 @@ impl ProcessManager {
 		manager
 	}
 
+	/// Starts a process with the given configuration. implicitly calls `start_process`
 	pub async fn start(&self, process: Process) -> Result<ProcessKey> {
 		let (return_tx, return_rx) = oneshot::channel();
+		// send a process to spawn and a transmitter to the loop above
+		// and wait for the key to be returned
 		let _ = self.tx.send((process, return_tx));
 		return_rx.await?
 	}
@@ -212,6 +218,7 @@ impl ProcessManager {
 		Ok(key)
 	}
 
+	/// Get the pid of a managed process
 	pub async fn get_pid(&self, key: ProcessKey) -> Result<Option<u32>> {
 		let inner = self.inner.read().await;
 		Ok(inner
