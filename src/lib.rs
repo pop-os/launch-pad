@@ -218,6 +218,15 @@ impl ProcessManager {
 		Ok(key)
 	}
 
+	/// Just gives you the exe, along with the pid, of a managed process
+	pub async fn get_exe_and_pid(&self, key: ProcessKey) -> Result<(String, Option<u32>)> {
+		let inner = self.inner.read().await;
+		let pdata = inner
+			.processes
+			.get(key)
+			.ok_or(error::Error::NonExistantProcess)?;
+		Ok((pdata.process.executable.clone(), pdata.pid))
+	}
 	/// Get the pid of a managed process
 	pub async fn get_pid(&self, key: ProcessKey) -> Result<Option<u32>> {
 		let inner = self.inner.read().await;
