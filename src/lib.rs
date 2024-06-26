@@ -75,7 +75,8 @@ impl ProcessManager {
 		manager
 	}
 
-	/// Starts a process with the given configuration. implicitly calls `start_process`
+	/// Starts a process with the given configuration. implicitly calls
+	/// `start_process`
 	pub async fn start(&self, process: Process) -> Result<ProcessKey> {
 		let (return_tx, return_rx) = oneshot::channel();
 		// send a process to spawn and a transmitter to the loop above
@@ -162,7 +163,7 @@ impl ProcessManager {
 		});
 		let process = inner.processes.get_mut(key).unwrap();
 
-		let fd_list = if let Some(mut fds) = callbacks.fds.take() {
+		let fd_list = if let Some(fds) = callbacks.fds.take() {
 			fds()
 		} else {
 			Vec::new()
@@ -227,6 +228,7 @@ impl ProcessManager {
 			.ok_or(error::Error::NonExistantProcess)?;
 		Ok((pdata.process.executable.clone(), pdata.pid))
 	}
+
 	/// Get the pid of a managed process
 	pub async fn get_pid(&self, key: ProcessKey) -> Result<Option<u32>> {
 		let inner = self.inner.read().await;
@@ -276,7 +278,7 @@ impl ProcessManager {
 			RestartMode::Instant => {}
 		}
 		let mut fd_callback = process_data.process.callbacks.fds.take();
-		let fd_list = if let Some(mut fds) = fd_callback.take() {
+		let fd_list = if let Some(fds) = fd_callback.take() {
 			fds()
 		} else {
 			Vec::new()

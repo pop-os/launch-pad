@@ -4,8 +4,8 @@ use tokio::sync::mpsc;
 use super::{ProcessKey, ProcessManager};
 use std::{borrow::Cow, future::Future, os::fd::OwnedFd, pin::Pin};
 
-pub type ReturnFuture = Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>;
-pub type ReturnB = Pin<Box<dyn Future<Output = ()> + Send + Sync + 'static>>;
+pub type ReturnFuture =
+	sync_wrapper::SyncFuture<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>;
 pub type StringCallback =
 	Box<dyn Fn(ProcessManager, ProcessKey, String) -> ReturnFuture + Send + Sync + 'static>;
 pub type StartedCallback =
@@ -77,9 +77,11 @@ impl Process {
 	pub fn with_on_stdout<F, A>(mut self, on_stdout: F) -> Self
 	where
 		F: Fn(ProcessManager, ProcessKey, String) -> A + Unpin + Send + Sync + 'static,
-		A: Future<Output = ()> + Send + Sync + 'static,
+		A: Future<Output = ()> + Send + 'static,
 	{
-		self.callbacks.on_stdout = Some(Box::new(move |p, k, s| Box::pin(on_stdout(p, k, s))));
+		self.callbacks.on_stdout = Some(Box::new(move |p, k, s| {
+			sync_wrapper::SyncFuture::new(Box::pin(on_stdout(p, k, s)))
+		}));
 		self
 	}
 
@@ -87,9 +89,11 @@ impl Process {
 	pub fn with_on_stderr<F, A>(mut self, on_stderr: F) -> Self
 	where
 		F: Fn(ProcessManager, ProcessKey, String) -> A + Unpin + Send + Sync + 'static,
-		A: Future<Output = ()> + Send + Sync + 'static,
+		A: Future<Output = ()> + Send + 'static,
 	{
-		self.callbacks.on_stderr = Some(Box::new(move |p, k, s| Box::pin(on_stderr(p, k, s))));
+		self.callbacks.on_stderr = Some(Box::new(move |p, k, s| {
+			sync_wrapper::SyncFuture::new(Box::pin(on_stderr(p, k, s)))
+		}));
 		self
 	}
 
@@ -110,9 +114,11 @@ impl Process {
 	pub fn with_on_start<F, A>(mut self, on_start: F) -> Self
 	where
 		F: Fn(ProcessManager, ProcessKey, bool) -> A + Unpin + Send + Sync + 'static,
-		A: Future<Output = ()> + Send + Sync + 'static,
+		A: Future<Output = ()> + Send + 'static,
 	{
-		self.callbacks.on_start = Some(Box::new(move |p, k, r| Box::pin(on_start(p, k, r))));
+		self.callbacks.on_start = Some(Box::new(move |p, k, r| {
+			sync_wrapper::SyncFuture::new(Box::pin(on_start(p, k, r)))
+		}));
 		self
 	}
 
@@ -124,10 +130,10 @@ impl Process {
 	pub fn with_on_exit<F, A>(mut self, on_exit: F) -> Self
 	where
 		F: Fn(ProcessManager, ProcessKey, Option<i32>, bool) -> A + Unpin + Send + Sync + 'static,
-		A: Future<Output = ()> + Send + Sync + 'static,
+		A: Future<Output = ()> + Send + 'static,
 	{
 		self.callbacks.on_exit = Some(Box::new(move |p, k, code, restarting| {
-			Box::pin(on_exit(p, k, code, restarting))
+			sync_wrapper::SyncFuture::new(Box::pin(on_exit(p, k, code, restarting)))
 		}));
 		self
 	}
