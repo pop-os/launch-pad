@@ -15,6 +15,7 @@ tokio = { version = "1", features = ["process", "sync", "rt", "macros", "io-util
 tokio-util = "0.7"
 rand = "0.8"
 nix = "0.26"
+sync_wrapper = "1.0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
