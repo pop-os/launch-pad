@@ -240,12 +240,15 @@ impl ProcessManager {
 	}
 
 	async fn restart_process(&self, process_key: ProcessKey) -> Result<Child> {
-		let mut inner = self.inner.write().await;
+		let inner = self.inner.read().await;
 		let restart_mode = inner.restart_mode;
 		let process_data = inner
 			.processes
-			.get_mut(process_key)
+			.get(process_key)
 			.ok_or(Error::InvalidProcess(process_key))?;
+		let restarts = process_data.restarts;
+		let executable = process_data.process.executable.clone();
+		drop(inner);
 
 		// delay before restarting
 		match restart_mode {
@@ -254,14 +257,14 @@ impl ProcessManager {
 				let jittered_delay: u64 = rand::thread_rng().gen_range(0..backoff);
 				let backoff = Duration::from_millis(
 					2_u64
-						.saturating_pow(process_data.restarts as u32)
+						.saturating_pow(restarts as u32)
 						.saturating_mul(jittered_delay),
 				);
 				info!(
 					"sleeping for {}ms before restarting process {} (restart {})",
 					backoff.as_millis(),
-					process_data.process.executable,
-					process_data.restarts
+					executable,
+					restarts
 				);
 
 				tokio::time::sleep(backoff).await;
@@ -270,13 +273,18 @@ impl ProcessManager {
 				info!(
 					"sleeping for {}ms before restarting process {} (restart {})",
 					backoff.as_millis(),
-					process_data.process.executable,
-					process_data.restarts
+					executable,
+					restarts
 				);
 				tokio::time::sleep(backoff).await;
 			}
 			RestartMode::Instant => {}
 		}
+		let mut inner = self.inner.write().await;
+		let process_data = inner
+			.processes
+			.get_mut(process_key)
+			.ok_or(Error::InvalidProcess(process_key))?;
 		let mut fd_callback = process_data.process.callbacks.fds.take();
 		let fd_list = if let Some(fds) = fd_callback.take() {
 			fds()
