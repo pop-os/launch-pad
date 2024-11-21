@@ -11,6 +11,10 @@ use self::{
 	error::{Error, Result},
 	process::{Process, ProcessCallbacks, ReturnFuture},
 };
+use nix::{
+	sys::signal::{self, Signal},
+	unistd::Pid,
+};
 use rand::Rng;
 use slotmap::{new_key_type, SlotMap};
 use std::{
@@ -151,6 +155,7 @@ impl ProcessManager {
 			process.args_text()
 		);
 		let mut callbacks = std::mem::take(&mut process.callbacks);
+		let cancel_timeout = process.cancel_timeout;
 		let (callback_tx, mut callback_rx) = mpsc::unbounded_channel();
 
 		let cancel_token = self.cancel_token.child_token();
@@ -160,6 +165,7 @@ impl ProcessManager {
 			pid: None,
 			restarts: 0,
 			cancel_token: cancel_token.clone(),
+			cancel_timeout,
 		});
 		let process = inner.processes.get_mut(key).unwrap();
 
@@ -351,7 +357,53 @@ impl ProcessManager {
 			tokio::select! {
 				_ = cancel_token.cancelled() => {
 					info!("process '{:?}' cancelled", key);
-					command.kill().await.expect("failed to kill program");
+					let mut exit_code = None;
+					if let Some(id) = command.id() {
+						if let Err(err) = signal::kill(Pid::from_raw(id as i32), Signal::SIGTERM) {
+							log::error!("Error sending SIGTERM: {err:?}");
+						}
+						if let Some(t) = {
+							let inner = self.inner.read().await;
+							inner.processes.get(key).and_then(|p| p.cancel_timeout)
+						} {
+							match tokio::time::timeout(t, command.wait()).await {
+								Ok(res) => {
+									match res {
+										Ok(status) => {
+											exit_code = status.code();
+										},
+										Err(err) => {
+											log::error!("Failed to stop program gracefully. {err:?}");
+										},
+									}
+								}
+								Err(_) => {
+									log::error!("Failed to stop program gracefully before cancel timeout.");
+								}
+							};
+						} else {
+							match command.wait().await {
+								Ok(status) => {
+									exit_code = status.code();
+								},
+								Err(err) => {
+									log::error!("Failed to stop program gracefully. {err:?}");
+								},
+							}						}
+
+					} else {
+						log::error!("Failed to stop program gracefully. Missing pid.");
+					}
+
+					if exit_code.is_none() {
+						command.kill().await.expect("failed to kill program");
+						exit_code = Some(137);
+					}
+
+					if let Some(on_exit) = &callbacks.on_exit {
+						// wait for this to complete before potentially restarting
+						on_exit(self.clone(), key, exit_code, false).await;
+					}
 					break;
 				},
 				Some(message) = stdin_rx.recv() => {
@@ -486,6 +538,7 @@ struct ProcessData {
 	pid: Option<u32>,
 	restarts: usize,
 	cancel_token: CancellationToken,
+	cancel_timeout: Option<Duration>,
 }
 
 struct ProcessManagerInner {
