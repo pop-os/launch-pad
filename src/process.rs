@@ -2,7 +2,7 @@ use tokio::sync::mpsc;
 
 // SPDX-License-Identifier: MPL-2.0
 use super::{ProcessKey, ProcessManager};
-use std::{borrow::Cow, future::Future, os::fd::OwnedFd, pin::Pin};
+use std::{borrow::Cow, future::Future, os::fd::OwnedFd, pin::Pin, time::Duration};
 
 pub type ReturnFuture =
 	sync_wrapper::SyncFuture<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>;
@@ -34,6 +34,7 @@ pub struct Process {
 	pub(crate) callbacks: ProcessCallbacks,
 	pub(crate) stdin_tx: mpsc::Sender<Cow<'static, [u8]>>,
 	pub(crate) stdin_rx: Option<mpsc::Receiver<Cow<'static, [u8]>>>,
+	pub(crate) cancel_timeout: Option<Duration>,
 }
 
 impl Process {
@@ -46,6 +47,7 @@ impl Process {
 			callbacks: ProcessCallbacks::default(),
 			stdin_tx,
 			stdin_rx: Some(stdin_rx),
+			cancel_timeout: Some(Duration::from_secs(1)),
 		}
 	}
 
@@ -58,6 +60,12 @@ impl Process {
 	/// Sets the arguments to pass to the executable.
 	pub fn with_args(mut self, args: impl IntoIterator<Item = impl ToString>) -> Self {
 		self.args = args.into_iter().map(|s| s.to_string()).collect();
+		self
+	}
+
+	/// Sets the cancellation timeout before forcing the process to exit.
+	pub fn with_cancel_timeout(mut self, t: impl Into<Option<Duration>>) -> Self {
+		self.cancel_timeout = t.into();
 		self
 	}
 
