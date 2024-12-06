@@ -396,7 +396,9 @@ impl ProcessManager {
 					}
 
 					if exit_code.is_none() {
-						command.kill().await.expect("failed to kill program");
+						if let Err(err) = command.kill().await {
+							log::error!("Failed to kill program. {err:?}");
+						};
 						exit_code = Some(137);
 					}
 
