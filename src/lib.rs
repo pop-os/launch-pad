@@ -483,6 +483,19 @@ impl ProcessManager {
 		}
 	}
 
+	/// update the args of a managed process
+	/// This will reset previous args if they are not set again
+	/// changes will be applied after the process restarts
+	pub async fn update_process_args(&mut self, key: &ProcessKey, args: Vec<String>) -> Result<()> {
+		let mut r = self.inner.write().await;
+		if let Some(pdata) = r.processes.get_mut(*key) {
+			pdata.process.args = args;
+			Ok(())
+		} else {
+			Err(Error::NonExistantProcess)
+		}
+	}
+
 	/// update the env of a managed process
 	/// changes will be applied after the process restarts
 	pub async fn update_process_env(
