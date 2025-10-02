@@ -11,16 +11,13 @@ use self::{
     error::{Error, Result},
     process::{Process, ProcessCallbacks, ReturnFuture},
 };
-use nix::{
-    sys::signal::{self, Signal},
-    unistd::Pid,
-};
+
 use rand::Rng;
 use slotmap::{SlotMap, new_key_type};
 use std::{
     borrow::Cow,
     os::{
-        fd::{AsRawFd, OwnedFd},
+        fd::{AsRawFd, BorrowedFd, OwnedFd},
         unix::process::ExitStatusExt,
     },
     process::Stdio,
@@ -33,6 +30,11 @@ use tokio::{
     time::Duration,
 };
 use tokio_util::sync::CancellationToken;
+
+#[cfg(target_os = "linux")]
+use rustix::io_uring::Signal;
+#[cfg(target_os = "linux")]
+use rustix::process::{Pid, kill_process};
 
 new_key_type! { pub struct ProcessKey; }
 
@@ -193,7 +195,7 @@ impl ProcessManager {
                 .kill_on_drop(true)
                 .pre_exec(move || {
                     for fd in &raw_fds {
-                        util::mark_as_not_cloexec(*fd)?;
+                        util::mark_as_not_cloexec(BorrowedFd::borrow_raw(*fd))?;
                     }
                     Ok(())
                 })
@@ -260,7 +262,7 @@ impl ProcessManager {
         match restart_mode {
             RestartMode::ExponentialBackoff(backoff) => {
                 let backoff = backoff.as_millis() as u64;
-                let jittered_delay: u64 = rand::thread_rng().gen_range(0..backoff);
+                let jittered_delay: u64 = rand::rng().random_range(0..backoff);
                 let backoff = Duration::from_millis(
                     2_u64
                         .saturating_pow(restarts as u32)
@@ -308,7 +310,7 @@ impl ProcessManager {
                 .kill_on_drop(true)
                 .pre_exec(move || {
                     for fd in &raw_fds {
-                        util::mark_as_not_cloexec(*fd)?;
+                        util::mark_as_not_cloexec(BorrowedFd::borrow_raw(*fd))?;
                     }
                     Ok(())
                 })
@@ -359,9 +361,18 @@ impl ProcessManager {
                     info!("process '{:?}' cancelled", key);
                     let mut exit_code = None;
                     if let Some(id) = command.id() {
-                        if let Err(err) = signal::kill(Pid::from_raw(id as i32), Signal::SIGTERM) {
-                            log::error!("Error sending SIGTERM: {err:?}");
+                        #[cfg(target_os = "linux")]
+                        if let Some(pid) = Pid::from_raw(id as i32) {
+                            if let Err(err) = kill_process(pid, Signal::TERM) {
+                                log::error!("Error sending SIGTERM: {err:?}");
+                            }
                         }
+
+                        #[cfg(not(target_os = "linux"))]
+                        if unsafe { libc::kill(id as i32, libc::SIGTERM) == -1 } {
+                            log::error!("Error sending SIGTERM: {:?}", io::Error::last_os_error());
+                        }
+
                         if let Some(t) = {
                             let inner = self.inner.read().await;
                             inner.processes.get(key).and_then(|p| p.cancel_timeout)

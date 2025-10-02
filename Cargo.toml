@@ -14,8 +14,17 @@ thiserror = "2"
 tokio = { version = "1", features = ["process", "sync", "rt", "macros", "io-util", "time"] }
 tokio-util = "0.7"
 rand = "0.9"
-nix = { version = "0.30", features = ["signal", "fs"] }
 sync_wrapper = "1.0.2"
+# Used by fcntl
+rustix = { version= "1.1.2", features = ["fs"] }
+
+# Use io_uring for killing processes on Linux.
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version= "1.1.2", features = ["fs", "process", "io_uring"] }
+
+# Use libc for killing processes on other platforms.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+libc = "0.2.176"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
