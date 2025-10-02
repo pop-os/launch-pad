@@ -1,8 +1,8 @@
-use tokio::sync::mpsc;
-
 // SPDX-License-Identifier: MPL-2.0
+
 use super::{ProcessKey, ProcessManager};
 use std::{borrow::Cow, future::Future, os::fd::OwnedFd, pin::Pin, time::Duration};
+use tokio::sync::mpsc;
 
 pub type ReturnFuture =
     sync_wrapper::SyncFuture<Pin<Box<dyn Future<Output = ()> + Send + 'static>>>;

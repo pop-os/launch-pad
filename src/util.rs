@@ -1,18 +1,9 @@
-// SPDX-License-Identifier: GPL-3.0-only
-use nix::fcntl;
-use std::os::unix::prelude::*;
+// SPDX-License-Identifier: MPL-2.0
+use rustix::io::{FdFlags, fcntl_getfd, fcntl_setfd};
+use std::os::fd::BorrowedFd;
 
-pub(crate) fn mark_as_not_cloexec(raw_fd: RawFd) -> Result<(), tokio::io::Error> {
-    let Some(fd_flags) = fcntl::FdFlag::from_bits(fcntl::fcntl(raw_fd, fcntl::FcntlArg::F_GETFD)?)
-    else {
-        return Err(tokio::io::Error::new(
-            tokio::io::ErrorKind::Other,
-            "failed to get fd flags from file",
-        ));
-    };
-    fcntl::fcntl(
-        raw_fd,
-        fcntl::FcntlArg::F_SETFD(fd_flags.difference(fcntl::FdFlag::FD_CLOEXEC)),
-    )?;
+pub(crate) fn mark_as_not_cloexec(raw_fd: BorrowedFd) -> Result<(), tokio::io::Error> {
+    let fd_flags = fcntl_getfd(raw_fd)?;
+    fcntl_setfd(raw_fd, fd_flags.difference(FdFlags::CLOEXEC))?;
     Ok(())
 }
