@@ -1,4 +1,4 @@
-use launch_pad::{process::Process, ProcessKey, ProcessManager};
+use launch_pad::{ProcessKey, ProcessManager, process::Process};
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 
 static LAST_NUMBER: AtomicUsize = AtomicUsize::new(0);
