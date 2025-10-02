@@ -16,7 +16,7 @@ use nix::{
     unistd::Pid,
 };
 use rand::Rng;
-use slotmap::{new_key_type, SlotMap};
+use slotmap::{SlotMap, new_key_type};
 use std::{
     borrow::Cow,
     os::{
@@ -29,7 +29,7 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, Command},
-    sync::{mpsc, oneshot, RwLock},
+    sync::{RwLock, mpsc, oneshot},
     time::Duration,
 };
 use tokio_util::sync::CancellationToken;
