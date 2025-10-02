@@ -146,7 +146,7 @@ impl ProcessManager {
         if self.is_stopped() {
             return Err(Error::Stopped);
         }
-        let mut inner = self.inner.write().await;
+
         let Some(rx) = process.stdin_rx.take() else {
             return Err(Error::MissingStdinReceiver);
         };
@@ -162,15 +162,6 @@ impl ProcessManager {
 
         let cancel_token = self.cancel_token.child_token();
 
-        let key = inner.processes.insert(ProcessData {
-            process,
-            pid: None,
-            restarts: 0,
-            cancel_token: cancel_token.clone(),
-            cancel_timeout,
-        });
-        let process = inner.processes.get_mut(key).unwrap();
-
         let fd_list = if let Some(fds) = callbacks.fds.take() {
             fds()
         } else {
@@ -178,21 +169,26 @@ impl ProcessManager {
         };
         let raw_fds = fd_list.iter().map(|fd| fd.as_raw_fd()).collect::<Vec<_>>();
 
-        let mut command = Command::new(&process.process.executable);
+        let mut command = Command::new(&process.executable);
+
+        command
+            .args(&process.args)
+            .envs(process.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::piped())
+            .kill_on_drop(true);
+
+        let key = self.inner.write().await.processes.insert(ProcessData {
+            process,
+            pid: None,
+            restarts: 0,
+            cancel_token: cancel_token.clone(),
+            cancel_timeout,
+        });
+
         let command = unsafe {
             command
-                .args(&process.process.args)
-                .envs(
-                    process
-                        .process
-                        .env
-                        .iter()
-                        .map(|(k, v)| (k.as_str(), v.as_str())),
-                )
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .stdin(Stdio::piped())
-                .kill_on_drop(true)
                 .pre_exec(move || {
                     for fd in &raw_fds {
                         util::mark_as_not_cloexec(BorrowedFd::borrow_raw(*fd))?;
@@ -203,7 +199,7 @@ impl ProcessManager {
                 .map_err(Error::Process)?
         };
         drop(fd_list);
-        process.pid = command.id();
+        self.inner.write().await.processes.get_mut(key).unwrap().pid = command.id();
         // This adds futures into a queue and executes them in a separate task, in order
         // to both ensure execution of callbacks is in the same order the events are
         // received, and to avoid blocking the reception of events if a callback is slow
