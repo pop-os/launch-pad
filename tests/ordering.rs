@@ -28,7 +28,7 @@ async fn ensure_ordering() {
     let pm = ProcessManager::new().await;
     pm.start_process(
         Process::new()
-            .with_executable("target/debug/ordering")
+            .with_executable("/proc/self/exe")
             .with_on_stdout(on_stdout)
             .with_on_exit(on_exit),
     )
