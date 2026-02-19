@@ -366,7 +366,7 @@ impl ProcessManager {
 
                         #[cfg(not(target_os = "linux"))]
                         if unsafe { libc::kill(id as i32, libc::SIGTERM) == -1 } {
-                            log::error!("Error sending SIGTERM: {:?}", io::Error::last_os_error());
+                            log::error!("Error sending SIGTERM: {:?}", std::io::Error::last_os_error());
                         }
 
                         if let Some(t) = {
