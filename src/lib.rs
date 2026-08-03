@@ -3,6 +3,7 @@
 extern crate log;
 
 pub mod error;
+pub mod liveness;
 pub mod message;
 pub mod process;
 pub mod util;
@@ -38,6 +39,26 @@ use rustix::process::{Pid, kill_process};
 
 new_key_type! { pub struct ProcessKey; }
 
+/// Default ceiling for [`RestartMode::ExponentialBackoff`].
+///
+/// Without a ceiling the delay doubles without bound: at 20 restarts it is
+/// already over an hour, and past 30 it is measured in weeks, so a component
+/// that crashes repeatedly becomes unrestartable in practice while the log
+/// still cheerfully reports that a restart is pending.
+pub const DEFAULT_MAX_BACKOFF: Duration = Duration::from_secs(60);
+
+/// Default interval for the liveness check described in [`liveness`].
+///
+/// One small procfs read per process per tick, so the cost is negligible.
+pub const DEFAULT_LIVENESS_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How long a process must stay up before its restart counter is forgiven.
+///
+/// Without this the counter only ever grows, so a process that crashes rarely
+/// but over a long session still ends up pinned at the backoff ceiling and
+/// eventually exceeds `max_restarts` — even though it was healthy in between.
+pub const RESTART_DECAY_UPTIME: Duration = Duration::from_secs(60);
+
 #[derive(Clone)]
 pub struct ProcessManager {
     inner: Arc<RwLock<ProcessManagerInner>>,
@@ -55,6 +76,8 @@ impl ProcessManager {
         let inner = Arc::new(RwLock::new(ProcessManagerInner {
             restart_mode: RestartMode::Instant,
             max_restarts: 3,
+            max_backoff: DEFAULT_MAX_BACKOFF,
+            liveness_interval: Some(DEFAULT_LIVENESS_INTERVAL),
             processes: SlotMap::with_key(),
         }));
         let manager = ProcessManager {
@@ -111,6 +134,38 @@ impl ProcessManager {
     /// giving up.
     pub async fn set_max_restarts(&self, max_restarts: usize) {
         self.inner.write().await.max_restarts = max_restarts;
+    }
+
+    /// Returns the ceiling applied to [`RestartMode::ExponentialBackoff`].
+    pub async fn max_backoff(&self) -> Duration {
+        self.inner.read().await.max_backoff
+    }
+
+    /// Sets the ceiling applied to [`RestartMode::ExponentialBackoff`].
+    ///
+    /// Defaults to [`DEFAULT_MAX_BACKOFF`]. The backoff doubles per restart up
+    /// to this value and no further.
+    pub async fn set_max_backoff(&self, max_backoff: Duration) {
+        self.inner.write().await.max_backoff = max_backoff;
+    }
+
+    /// Returns how often supervised processes are checked for a death that
+    /// `waitpid` cannot report, or `None` if the check is disabled.
+    pub async fn liveness_interval(&self) -> Option<Duration> {
+        self.inner.read().await.liveness_interval
+    }
+
+    /// Sets how often supervised processes are checked for a death that
+    /// `waitpid` cannot report — see [`liveness`]. `None` disables the check.
+    ///
+    /// Defaults to [`DEFAULT_LIVENESS_INTERVAL`]. When the check trips, the
+    /// surviving threads are killed so the pending `wait()` can complete and
+    /// the process is reported through the normal exit path.
+    ///
+    /// Leaving this enabled is strongly recommended: the failure it detects is
+    /// otherwise permanent and silent.
+    pub async fn set_liveness_interval(&self, interval: Option<Duration>) {
+        self.inner.write().await.liveness_interval = interval;
     }
 
     /// Returns whether the process manager has been stopped or not.
@@ -183,6 +238,7 @@ impl ProcessManager {
             process,
             pid: None,
             restarts: 0,
+            started_at: std::time::Instant::now(),
             cancel_token: cancel_token.clone(),
             cancel_timeout,
         });
@@ -243,9 +299,41 @@ impl ProcessManager {
             .pid)
     }
 
+    #[allow(rustdoc::private_intra_doc_links)]
+    /// Delay before the next restart attempt: capped exponential growth with
+    /// full jitter.
+    ///
+    /// The delay doubles per restart up to `max_backoff`, then stops growing.
+    /// A uniform sample between `base` and that ceiling spreads simultaneous
+    /// restarts out instead of synchronising them.
+    ///
+    /// Every step saturates rather than overflowing, and the sampled range is
+    /// always non-empty, so no combination of arguments can panic — including a
+    /// zero `base`, which the previous `random_range(0..0)` could not survive.
+    fn exponential_backoff(base: Duration, max_backoff: Duration, restarts: usize) -> Duration {
+        let base_ms = base.as_millis().min(u64::MAX as u128) as u64;
+        let ceiling_ms = max_backoff.as_millis().min(u64::MAX as u128) as u64;
+
+        let grown_ms = base_ms
+            .saturating_mul(2_u64.saturating_pow(restarts.min(u32::MAX as usize) as u32))
+            .min(ceiling_ms);
+
+        // Full jitter between the base delay and the grown ceiling. `low`
+        // cannot exceed `high`, so the inclusive range is never empty.
+        let low = base_ms.min(grown_ms);
+        let delay_ms = if low == grown_ms {
+            low
+        } else {
+            rand::rng().random_range(low..=grown_ms)
+        };
+
+        Duration::from_millis(delay_ms)
+    }
+
     async fn restart_process(&self, process_key: ProcessKey) -> Result<Child> {
         let inner = self.inner.read().await;
         let restart_mode = inner.restart_mode;
+        let max_backoff = inner.max_backoff;
         let process_data = inner
             .processes
             .get(process_key)
@@ -257,13 +345,7 @@ impl ProcessManager {
         // delay before restarting
         match restart_mode {
             RestartMode::ExponentialBackoff(backoff) => {
-                let backoff = backoff.as_millis() as u64;
-                let jittered_delay: u64 = rand::rng().random_range(0..backoff);
-                let backoff = Duration::from_millis(
-                    2_u64
-                        .saturating_pow(restarts as u32)
-                        .saturating_mul(jittered_delay),
-                );
+                let backoff = Self::exponential_backoff(backoff, max_backoff, restarts);
                 info!(
                     "sleeping for {}ms before restarting process {} (restart {})",
                     backoff.as_millis(),
@@ -296,6 +378,12 @@ impl ProcessManager {
             Vec::new()
         };
         let raw_fds = fd_list.iter().map(|fd| fd.as_raw_fd()).collect::<Vec<_>>();
+
+        // Count the attempt before it can fail. Incrementing only on success
+        // would let a spawn that keeps failing retry forever at the same delay,
+        // since both the backoff and `max_restarts` are driven by this counter.
+        process_data.restarts += 1;
+
         let command = unsafe {
             Command::new(&process_data.process.executable)
                 .args(&process_data.process.args)
@@ -314,9 +402,9 @@ impl ProcessManager {
                 .map_err(Error::Process)?
         };
         process_data.pid = command.id();
+        process_data.started_at = std::time::Instant::now();
         drop(fd_list);
 
-        process_data.restarts += 1;
         info!(
             "restarted process '{} {} {}', now at {} restarts",
             process_data.process.env_text(),
@@ -351,8 +439,67 @@ impl ProcessManager {
             .stdin
             .take()
             .expect("No stdin in process, even though we should be piping it");
+
+        // A `tokio::time::Interval` rather than a `sleep` per iteration: an
+        // interval keeps its own schedule, so a process that produces a steady
+        // stream of output cannot starve the check by continually winning the
+        // select and resetting a fresh timer.
+        let liveness_interval = self.inner.read().await.liveness_interval;
+        let mut liveness = liveness_interval.map(|period| {
+            let mut interval =
+                tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+            // A missed tick means the loop was busy, not that we owe a burst of
+            // catch-up health checks.
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            interval
+        });
+        // Only fire once per pid: if a kill somehow leaves the process in place,
+        // this must not become a kill loop.
+        let mut liveness_tripped_for: Option<u32> = None;
+
         loop {
             tokio::select! {
+                // Catch the one death `wait()` below can never report: the
+                // thread-group leader gone while its siblings run on. Killing the
+                // survivors lets that pending `wait()` complete, so the exit is
+                // reported through the normal path with no second mechanism.
+                Some(_) = async {
+                    match liveness.as_mut() {
+                        Some(interval) => Some(interval.tick().await),
+                        None => None,
+                    }
+                } => {
+                    if let Some(id) = command.id() {
+                        if liveness_tripped_for != Some(id) {
+                            if let Some(threads) = liveness::stuck_zombie_leader(id) {
+                                error!(
+                                    "process '{:?}' (pid {}) has exited but {} of its threads are \
+                                     still alive, so it can never be reaped - killing the \
+                                     survivors so supervision can continue",
+                                    key,
+                                    id,
+                                    threads - 1
+                                );
+                                liveness_tripped_for = Some(id);
+
+                                #[cfg(target_os = "linux")]
+                                if let Some(pid) = Pid::from_raw(id as i32) {
+                                    if let Err(err) = kill_process(pid, Signal::KILL) {
+                                        error!("failed to kill wedged process: {err:?}");
+                                    }
+                                }
+
+                                #[cfg(not(target_os = "linux"))]
+                                if unsafe { libc::kill(id as i32, libc::SIGKILL) == -1 } {
+                                    error!(
+                                        "failed to kill wedged process: {:?}",
+                                        std::io::Error::last_os_error()
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
                 _ = cancel_token.cancelled() => {
                     info!("process '{:?}' cancelled", key);
                     let mut exit_code = None;
@@ -432,32 +579,89 @@ impl ProcessManager {
                     }
                 }
                 ret = command.wait() => {
-                    let ret = ret.unwrap();
+                    // A failure here means the child's status is unknowable, not
+                    // that it is still alive. Unwrapping would panic this task
+                    // and end supervision for the process with no notification
+                    // to the consumer, so report it as an exit of unknown cause.
+                    let ret = match ret {
+                        Ok(ret) => Some(ret),
+                        Err(err) => {
+                            error!("failed to wait on process '{:?}', treating it as exited: {}", key, err);
+                            None
+                        }
+                    };
+                    let success = ret.as_ref().is_some_and(|r| r.success());
+                    let exit_code = ret.as_ref().and_then(|r| r.code());
+
                     let is_restarting = {
-                        let inner = self.inner.read().await;
-                        let process = inner.processes.get(key).unwrap();
-                        if !ret.success() {
+                        let mut inner = self.inner.write().await;
+                        let max_restarts = inner.max_restarts;
+                        // The entry is never removed from the slotmap, but read
+                        // defensively rather than unwrapping: a panic here would
+                        // silently end supervision.
+                        let Some(process) = inner.processes.get_mut(key) else {
+                            error!("process '{:?}' vanished from the manager, ending supervision", key);
+                            break;
+                        };
+                        if !success {
                             let env_text = process.process.env_text();
                             let exe_text = process.process.exe_text();
                             let args_text = process.process.args_text();
-                            if let Some(signal) = ret.signal() {
+                            if let Some(signal) = ret.as_ref().and_then(|r| r.signal()) {
                                 error!("process '{} {} {}' terminated with signal {}", env_text, exe_text, args_text, signal);
-                            } else if let Some(code) = ret.code() {
+                            } else if let Some(code) = exit_code {
                                 error!("process '{} {} {}' failed with code {}", env_text, exe_text, args_text, code);
                             }
                         }
-                        !ret.success() && (inner.max_restarts > process.restarts)
+                        // Forgive earlier restarts once a process has proven it
+                        // can stay up, so occasional crashes spread over a long
+                        // session neither pin the backoff at its ceiling nor
+                        // exhaust `max_restarts`.
+                        if process.started_at.elapsed() >= RESTART_DECAY_UPTIME && process.restarts > 0 {
+                            info!(
+                                "process '{}' was up for {}s, forgiving its {} earlier restart(s)",
+                                process.process.exe_text(),
+                                process.started_at.elapsed().as_secs(),
+                                process.restarts
+                            );
+                            process.restarts = 0;
+                        }
+                        !success && (max_restarts > process.restarts)
                     };
                     if let Some(on_exit) = &callbacks.on_exit {
                         // wait for this to complete before potentially restarting
-                        on_exit(self.clone(), key, ret.code(), is_restarting).await;
+                        on_exit(self.clone(), key, exit_code, is_restarting).await;
                     }
                     if is_restarting {
                         info!("draining stdin receiver before restarting process");
                         while let Ok(_) = stdin_rx.try_recv() {}
 
-                        match self.restart_process(key).await {
-                            Ok(new_command) =>  {
+                        // Keep retrying while restarts remain. A spawn failure is
+                        // often transient — ENOMEM under the same pressure that
+                        // killed the child, or ENOENT while a package upgrade
+                        // swaps the binary — and each attempt backs off further
+                        // because `restart_process` counts it.
+                        let restarted = loop {
+                            match self.restart_process(key).await {
+                                Ok(new_command) => break Some(new_command),
+                                Err(err) => {
+                                    error!("failed to restart process '{:?}': {}", key, err);
+                                    let exhausted = {
+                                        let inner = self.inner.read().await;
+                                        inner
+                                            .processes
+                                            .get(key)
+                                            .is_none_or(|p| p.restarts >= inner.max_restarts)
+                                    };
+                                    if exhausted {
+                                        break None;
+                                    }
+                                }
+                            }
+                        };
+
+                        match restarted {
+                            Some(new_command) =>  {
                                 command = new_command;
                                 (stdout, stderr) = match (command.stdout.take(), command.stderr.take()) {
                                     (Some(stdout), Some(stderr)) => (
@@ -479,8 +683,15 @@ impl ProcessManager {
                                 }
                                 continue;
                             }
-                            Err(err) => {
-                                error!("failed to restart process '{:?}: {}", key, err);
+                            None => {
+                                // The consumer was told a restart was coming and
+                                // may have acted on it. Correct the record so it
+                                // can react, rather than leaving it to believe a
+                                // restart is still pending.
+                                error!("giving up on restarting process '{:?}'", key);
+                                if let Some(on_exit) = &callbacks.on_exit {
+                                    on_exit(self.clone(), key, exit_code, false).await;
+                                }
                             }
                         }
                     }
@@ -555,10 +766,70 @@ impl ProcessManager {
     // TODO methods for modifying other process data
 }
 
+#[cfg(test)]
+mod backoff_tests {
+    use super::{DEFAULT_MAX_BACKOFF, ProcessManager};
+    use tokio::time::Duration;
+
+    fn delay(base_ms: u64, cap: Duration, restarts: usize) -> Duration {
+        ProcessManager::exponential_backoff(Duration::from_millis(base_ms), cap, restarts)
+    }
+
+    /// The regression that motivated this: with the old
+    /// `2^restarts * U(0, base)` formula and cosmic-session's 10ms base, restart
+    /// 21 slept 12582912ms — 3h29m — and by restart 30 it was months.
+    #[test]
+    fn is_capped() {
+        for restarts in [0, 1, 10, 21, 30, 64, 1000, usize::MAX] {
+            let d = delay(10, DEFAULT_MAX_BACKOFF, restarts);
+            assert!(
+                d <= DEFAULT_MAX_BACKOFF,
+                "restart {restarts} produced {d:?}, over the {DEFAULT_MAX_BACKOFF:?} cap"
+            );
+        }
+    }
+
+    /// Saturating arithmetic throughout, so absurd inputs clamp instead of
+    /// overflowing or panicking.
+    #[test]
+    fn survives_extreme_inputs() {
+        let _ = delay(u64::MAX, Duration::from_millis(u64::MAX), usize::MAX);
+        let _ = delay(0, Duration::ZERO, 0);
+        let _ = delay(1, Duration::ZERO, 99);
+    }
+
+    /// `random_range(0..0)` panics; a zero base must not.
+    #[test]
+    fn zero_base_does_not_panic() {
+        assert_eq!(delay(0, DEFAULT_MAX_BACKOFF, 5), Duration::ZERO);
+    }
+
+    /// Never below the base delay, so a restart storm cannot become a hot loop.
+    #[test]
+    fn never_below_base() {
+        for restarts in 0..40 {
+            assert!(delay(50, DEFAULT_MAX_BACKOFF, restarts) >= Duration::from_millis(50));
+        }
+    }
+
+    /// Growth actually happens between the base and the ceiling.
+    #[test]
+    fn grows_with_restarts() {
+        let cap = Duration::from_secs(600);
+        // Jittered, so compare the ceilings a large sample can reach.
+        let early = (0..200).map(|_| delay(10, cap, 1)).max().unwrap();
+        let late = (0..200).map(|_| delay(10, cap, 12)).max().unwrap();
+        assert!(late > early, "expected growth: {early:?} -> {late:?}");
+    }
+}
+
 struct ProcessData {
     process: Process,
     pid: Option<u32>,
     restarts: usize,
+    /// When the current incarnation was spawned, used to forgive the restart
+    /// counter once a process has proven stable — see [`RESTART_DECAY_UPTIME`].
+    started_at: std::time::Instant,
     cancel_token: CancellationToken,
     cancel_timeout: Option<Duration>,
 }
@@ -566,6 +837,8 @@ struct ProcessData {
 struct ProcessManagerInner {
     restart_mode: RestartMode,
     max_restarts: usize,
+    max_backoff: Duration,
+    liveness_interval: Option<Duration>,
     processes: SlotMap<ProcessKey, ProcessData>,
 }
 
