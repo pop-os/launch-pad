@@ -22,6 +22,7 @@ use std::{
     },
     process::Stdio,
     sync::Arc,
+    time::Instant,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -37,6 +38,14 @@ use rustix::io_uring::Signal;
 use rustix::process::{Pid, kill_process};
 
 new_key_type! { pub struct ProcessKey; }
+
+/// Upper bound on the delay computed by [`RestartMode::ExponentialBackoff`].
+/// The delay doubles per restart, so without a bound a process that has been
+/// restarted a few dozen times is held off for days.
+const MAX_EXPONENTIAL_BACKOFF: Duration = Duration::from_secs(60);
+
+/// Default uptime after which a process is considered to have recovered.
+const DEFAULT_RESTART_COUNT_RESET_AFTER: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub struct ProcessManager {
@@ -55,6 +64,7 @@ impl ProcessManager {
         let inner = Arc::new(RwLock::new(ProcessManagerInner {
             restart_mode: RestartMode::Instant,
             max_restarts: 3,
+            restart_count_reset_after: DEFAULT_RESTART_COUNT_RESET_AFTER,
             processes: SlotMap::with_key(),
         }));
         let manager = ProcessManager {
@@ -111,6 +121,20 @@ impl ProcessManager {
     /// giving up.
     pub async fn set_max_restarts(&self, max_restarts: usize) {
         self.inner.write().await.max_restarts = max_restarts;
+    }
+
+    /// Returns the uptime after which a process is considered to have
+    /// recovered, clearing its restart count.
+    pub async fn restart_count_reset_after(&self) -> Duration {
+        self.inner.read().await.restart_count_reset_after
+    }
+
+    /// Sets the uptime after which a process is considered to have recovered,
+    /// clearing its restart count. Without this the count is a lifetime crash
+    /// total, so two failures a month apart back off as hard as two a second
+    /// apart.
+    pub async fn set_restart_count_reset_after(&self, restart_count_reset_after: Duration) {
+        self.inner.write().await.restart_count_reset_after = restart_count_reset_after;
     }
 
     /// Returns whether the process manager has been stopped or not.
@@ -263,7 +287,8 @@ impl ProcessManager {
                     2_u64
                         .saturating_pow(restarts as u32)
                         .saturating_mul(jittered_delay),
-                );
+                )
+                .min(MAX_EXPONENTIAL_BACKOFF);
                 info!(
                     "sleeping for {}ms before restarting process {} (restart {})",
                     backoff.as_millis(),
@@ -351,6 +376,7 @@ impl ProcessManager {
             .stdin
             .take()
             .expect("No stdin in process, even though we should be piping it");
+        let mut started = Instant::now();
         loop {
             tokio::select! {
                 _ = cancel_token.cancelled() => {
@@ -433,6 +459,14 @@ impl ProcessManager {
                 }
                 ret = command.wait() => {
                     let ret = ret.unwrap();
+                    {
+                        let mut inner = self.inner.write().await;
+                        if started.elapsed() >= inner.restart_count_reset_after
+                            && let Some(process) = inner.processes.get_mut(key)
+                        {
+                            process.restarts = 0;
+                        }
+                    }
                     let is_restarting = {
                         let inner = self.inner.read().await;
                         let process = inner.processes.get(key).unwrap();
@@ -459,6 +493,7 @@ impl ProcessManager {
                         match self.restart_process(key).await {
                             Ok(new_command) =>  {
                                 command = new_command;
+                                started = Instant::now();
                                 (stdout, stderr) = match (command.stdout.take(), command.stderr.take()) {
                                     (Some(stdout), Some(stderr)) => (
                                         BufReader::new(stdout).lines(),
@@ -566,6 +601,7 @@ struct ProcessData {
 struct ProcessManagerInner {
     restart_mode: RestartMode,
     max_restarts: usize,
+    restart_count_reset_after: Duration,
     processes: SlotMap<ProcessKey, ProcessData>,
 }
 
